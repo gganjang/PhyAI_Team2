@@ -1,0 +1,2 @@
+# Extra pip packages for this app's runtime image (e.g. torch, numpy).
+# Don't add piper_sdk or other hardware drivers: the control PC host owns the hardware.

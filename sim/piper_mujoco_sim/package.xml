@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>piper_mujoco_sim</name>
+  <version>0.0.1</version>
+  <description>MuJoCo quick-trial simulator for PIPER; stands in for the control PC host stack on the dev PC.</description>
+  <maintainer email="junhjang@keti.re.kr">PhyAI Team2</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- mujoco itself is installed with pip in the dev image (no rosdep key) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,68 @@
+{
+  "name": "PhyAI ROS2 (PIPER)",
+  "build": {
+    "dockerfile": "../docker/Dockerfile",
+    "context": "..",
+    "target": "dev",
+    "args": {
+      "ROS_DISTRO": "humble",
+      "USERNAME": "dev",
+      "USER_UID": "1000",
+      "USER_GID": "1000"
+    }
+  },
+  "remoteUser": "dev",
+  // Rewrites the container user's UID/GID to match the host user at startup
+  "updateRemoteUserUID": true,
+
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/ws/src/PhyAI_Team2,type=bind",
+  "workspaceFolder": "/home/dev/ws/src/PhyAI_Team2",
+
+  "runArgs": [
+    "--gpus=all",
+    // Host networking + shared IPC: ROS 2 DDS discovery and shared-memory transport with host nodes
+    "--network=host",
+    "--ipc=host"
+  ],
+
+  "containerEnv": {
+    // "all" includes graphics, which the simulator's offscreen (EGL) rendering needs
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "ROS_DOMAIN_ID": "${localEnv:ROS_DOMAIN_ID:0}"
+  },
+
+  // MuJoCo simulator browser view (sim.launch.py http_port)
+  "forwardPorts": [23517],
+  "portsAttributes": {
+    "23517": { "label": "MuJoCo view", "onAutoForward": "silent" }
+  },
+
+  "mounts": [
+    // Persist colcon build artifacts across container rebuilds
+    "source=phyai-ros2-build,target=/home/dev/ws/build,type=volume",
+    "source=phyai-ros2-install,target=/home/dev/ws/install,type=volume",
+    "source=phyai-ros2-log,target=/home/dev/ws/log,type=volume"
+  ],
+
+  "postCreateCommand": "sudo chown -R dev:dev /home/dev/ws && sudo apt-get update && rosdep install --from-paths /home/dev/ws/src --ignore-src -y || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-iot.vscode-ros",
+        "ms-vscode.cpptools",
+        "redhat.vscode-xml",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "python.analysis.extraPaths": [
+          "/opt/ros/humble/lib/python3.10/site-packages",
+          "/opt/ros/humble/local/lib/python3.10/dist-packages"
+        ]
+      }
+    }
+  }
+}
