@@ -2,245 +2,315 @@
 
 **English** | [한국어](README.ko.md)
 
-A shared ROS 2 Humble environment for developing Python apps that control the PIPER robot arm, and for shipping
-them to the control PC as Docker images.
+Develop an app in Docker, test it with MuJoCo, then run its runtime image on the control PC.
 
-## Architecture
-The control PC host owns all hardware. Apps run in a container and reach the robot **only through ROS 2 topics**,
-so developers never deal with the SDK, CAN or device drivers.
-```
- Control PC host  (Ubuntu 22.04 + ROS 2 Humble, maintained by the host admin)
- ├─ piper_bridge            ROS 2 messages from apps → piper_sdk → CAN → arm
- ├─ camera driver
- └─ robot_state_publisher
-          │  ROS 2 / DDS, same host network
-          ▼
- Runtime container  (--network host, built from this repo)
- ├─ perception
- ├─ planning
- └─ application             ← your app in apps/<name>/
-```
-
-## Steps
-```
- 1. Setup      open the repo in the devcontainer (docker/Dockerfile, target: dev)
- 2. Implement  write your app in apps/<name>/
- 3. Build      scripts/build_runtime.sh <name>            → image phyai/app-<name>:latest
- 4. Deploy     scripts/deploy.sh <name> <user@control-pc> → ~/phyai/run_runtime.sh <name>
-```
-The dev and runtime images are built from the same `base` stage (ROS 2 Humble), so an app that works in the
-devcontainer runs the same way on the control PC.
-
-**Local or remote?** Steps marked *Local* and *Remote* differ only in how you open the devcontainer. Everything
-else is the same; both see the simulator in a web browser.
-- **Local**: you sit at the dev PC, with its own monitor.
-- **Remote**: you connect to the dev PC over SSH from your laptop (any OS, including Windows).
-
----
+[Setup](#1-setup) → [Implement](#2-implement) → [Test](#3-test-with-mujoco) → [Build](#4-build-the-runtime-image) → [Run on the control PC](#5-run-on-the-control-pc)
 
 ## 1. Setup
 
-### Dev PC prerequisites
-| Provided by the dev PC | Installed inside the container by you |
+**What:** Open the shared Ubuntu 22.04 + ROS 2 Humble development environment.
+
+**How:** Open this repo in VS Code and run **Dev Containers: Reopen in Container**.
+
+**Expected result:** A container terminal with ROS 2 available; the repo is at `~/ws/src/PhyAI_Team2`.
+
+### Requirements
+
+| Where | Required |
 |---|---|
-| Ubuntu 22.04 LTS, NVIDIA driver | CUDA / PyTorch (via `pip`, per app) |
-| Docker + NVIDIA Container Toolkit | ROS packages your app needs (via `rosdep`) |
+| Dev PC running Docker | Linux (e.g. Ubuntu 24.04), NVIDIA driver, Docker, NVIDIA Container Toolkit |
+| PC running VS Code | Dev Containers extension; Remote - SSH extension for remote work |
+| Inside the container | App-specific ROS dependencies (`rosdep`) and Python libraries (`pip`) |
 
-On your own machine you need VS Code with the *Dev Containers* extension. For remote work, also install the
-*Remote - SSH* extension.
+The Docker image includes Ubuntu 22.04 and ROS 2 Humble. **The dev PC host can use Ubuntu 24.04**;
+it does not need Ubuntu 22.04 or a separate ROS installation. The current devcontainer uses Linux
+host networking and an NVIDIA GPU for the simulator view. A laptop used for SSH can run any OS.
 
-### 1-A. Local: open the devcontainer
-1. Clone the repo on the dev PC and open it in VS Code.
-2. Run **Dev Containers: Reopen in Container**. The first build takes a few minutes.
+### Local or remote access
 
-### 1-B. Remote: open the devcontainer
-1. In VS Code on your laptop, run **Remote-SSH: Connect to Host...** and connect to `<user>@<dev-pc>`.
-2. Clone the repo on the dev PC and open the folder in that remote window.
-3. Run **Dev Containers: Reopen in Container**. The container runs on the dev PC, and the first build takes a few minutes.
+- **Local:** Clone the repo on the dev PC, open it in VS Code, then reopen in the container.
+- **Remote:** Connect to `<user>@<dev-pc>` with **Remote-SSH: Connect to Host...**, open the repo
+  on that PC, then reopen in the container. Docker runs on the dev PC.
 
-### Check the environment (both)
-In the container terminal:
+The first container build takes a few minutes. `~/ws` is the colcon workspace.
+
+### Check the environment
+
+Run in the container:
+
 ```bash
 ros2 doctor --report | head
 nvidia-smi
 ```
-The repo is mounted at `~/ws/src/PhyAI_Team2`, so `~/ws` is your colcon workspace.
 
----
+ROS diagnostics and GPU information should appear.
 
 ## 2. Implement
 
-### Robot interface
-This is everything your app needs to know about the hardware. Talk to the robot through these topics only.
+**What:** Create an app under `apps/<name>/`.
 
-| Topic | Type | Direction | Provided by |
-|---|---|---|---|
-| `/joint_states` | `sensor_msgs/JointState` (`joint1`–`joint8`, rad / m) | host → app | piper_bridge |
-| `/joint_ctrl_single` *(provisional)* | `sensor_msgs/JointState`: target positions for `joint1`–`joint6` (rad) and `joint7` = gripper opening (0–0.035 m) | app → host | piper_bridge |
-| *TBD: camera image(s)* | `sensor_msgs/Image` (+ `CameraInfo`) | host → app | camera driver |
-| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | host → app | robot_state_publisher |
-| `/robot_description` | `std_msgs/String` (URDF) | host → app | robot_state_publisher |
+**How:** Copy the example, rename its ROS package, and edit its Python code.
 
-> **TBD** and *provisional* rows are fixed by whoever maintains the host stack. The arm command currently follows the
-> `piper_ros` convention, and the simulator uses it too. If piper_bridge uses custom message types, their
-> message package must be added to the base image so apps can import them.
+**Expected result:** Your app has a `start.sh` and sends commands through ROS topics.
 
-### Create your app from the template
 ```bash
 cd ~/ws/src/PhyAI_Team2
 cp -r apps/example apps/<name>
 mv apps/<name>/example_app apps/<name>/<your_pkg>
 ```
-Then rename `example_app` to `<your_pkg>` in `package.xml`, `setup.py`, `setup.cfg`, `resource/`, the Python
-package folder and the launch file.
 
-```
+### Rename and organize the app
+
+Replace `example_app` with `<your_pkg>` in `package.xml`, `setup.py`, `setup.cfg`, `resource/`,
+the Python package folder, the launch file, and `start.sh`.
+
+```text
 apps/<name>/
-├── start.sh            # required: what the control PC runs
-├── requirements.txt    # optional: extra pip packages
-└── <your_pkg>/         # one or more ROS 2 packages
+├── start.sh                 # starts your app
+├── requirements.txt         # optional pip dependencies
+└── <your_pkg>/              # one or more ROS packages
     ├── package.xml
     ├── setup.py / setup.cfg / resource/<your_pkg>
     ├── <your_pkg>/*.py
     └── launch/*.launch.py
 ```
 
-### Rules for the app to deploy
-The runtime build copies **only** `apps/<name>/` and keeps only what colcon installs. An app that runs in the
-devcontainer can still fail to deploy if it breaks these rules.
+Use lowercase letters, digits, `-`, and `_` for `<name>`. ROS package names must be unique across
+the repo. Keep app files inside `apps/<name>/`; runtime builds copy only that directory.
 
-**Naming**
-- `<name>` becomes the image tag `phyai/app-<name>`, so use only lowercase letters, digits, `-` and `_`.
-- Package names must be **unique across the whole repo**. The devcontainer builds every `apps/*` package in one
-  workspace, so two copies named `example_app` will clash.
-- Don't reference files outside `apps/<name>/` or absolute paths on your PC. They won't exist in the image.
+### Robot interface
 
-**`package.xml`: declare every dependency**
-The runtime image installs **only** `<exec_depend>` and `<depend>` entries, via `rosdep`. Anything left out still
-works in the devcontainer (where you may have installed it by hand, or another app pulled it in) and then fails on the control PC with
-`ModuleNotFoundError` or `package not found`.
-- `<exec_depend>`: needed at run time. Typical for Python: `rclpy`, message packages, `launch`, `launch_ros`.
-- `<depend>`: needed to build *and* run (common in C++ packages).
-- `<build_depend>`: needed only to build. It won't be in the runtime image.
-- Python libraries can be rosdep keys (e.g. `<exec_depend>python3-numpy</exec_depend>`). Check a key with
-  `rosdep resolve <key>`. An unknown key fails the build. If a library has no rosdep key, use `requirements.txt` instead.
+Your app publishes targets; the simulator or control PC bridge receives them and returns feedback.
 
-**`setup.py`: install everything needed at run time**
-- Executables go in `entry_points['console_scripts']`, e.g. `'heartbeat = example_app.heartbeat:main'`.
-- Launch, config, URDF and model files go in `data_files`, e.g.
-  `('share/' + package_name + '/launch', glob('launch/*.launch.py'))`. Load them at run time with
-  `get_package_share_directory('<your_pkg>')`, not relative paths.
-- Keep `resource/<your_pkg>` (an empty marker file) and `setup.cfg`. Without them `ros2 run` can't find the package.
+| Topic | Message | Direction |
+|---|---|---|
+| `/joint_ctrl_single` *(provisional)* | `sensor_msgs/JointState`: `joint1`–`joint6` angles (rad), `joint7` gripper opening (0–0.035 m) | app → arm |
+| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` positions and velocities | arm → app |
+| Camera topics *(TBD)* | `sensor_msgs/Image`, `CameraInfo` | host → app |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | host → app |
+| `/robot_description` | `std_msgs/String` (URDF) | host → app |
 
-**`requirements.txt`**
-- Pip packages that aren't ROS packages, e.g. `torch`, `opencv-python`. Don't add `piper_sdk` or other hardware
-  drivers. The host owns the hardware.
-- Pin versions (`torch==2.5.1`) so the image you deploy matches what you tested.
-- Large packages (torch is several GB) make the image slow to deploy. Add only what the app imports.
+The host stack administrator confirms provisional topics and camera names. Arm commands currently
+follow the `piper_ros` convention. If the bridge uses custom messages, add their package to the base image.
 
-**`start.sh`**
-- Runs as user `dev`, with ROS and your app already sourced.
-- Start the process with `exec` (e.g. `exec ros2 launch <your_pkg> <file>.launch.py`) so Ctrl+C and `docker stop`
-  reach it and shut it down cleanly.
-- Use LF line endings, not CRLF.
+### Dependencies and installed files
 
-**On the control PC**
-- There is no display, so don't open GUI windows from `start.sh`.
-- The container has no device access. Reach the arm and cameras only through the [Robot interface](#robot-interface).
+| File | What to declare |
+|---|---|
+| `package.xml` | Every ROS/rosdep dependency: `<exec_depend>` for runtime, `<build_depend>` for build, `<depend>` for both |
+| `requirements.txt` | Non-ROS Python dependencies without rosdep keys; pin versions |
+| `install_system_deps.sh` | Optional system libraries or CUDA Toolkit; run as root during image build |
+| `setup.py` | Executables in `console_scripts`; launch, config, URDF, and model files in `data_files` |
+| `start.sh` | Launch command, using `exec`; LF line endings |
 
-### Develop and test in the devcontainer
+Example executable registration: `'example = example_app.example:main'`.
+Keep `setup.cfg` and `resource/<your_pkg>` so ROS can find the executable. Load installed assets with
+`get_package_share_directory('<your_pkg>')`. Check rosdep keys with `rosdep resolve <key>`.
+
+Runtime images install only execution dependencies and installed app files. Missing declarations
+can cause `ModuleNotFoundError` or missing files after deployment. Add only imported pip libraries;
+large packages slow image transfers. Hardware SDKs and drivers belong on the host.
+
+### Architecture and runtime constraints
+
+```text
+Control PC host: Ubuntu 22.04 + ROS 2 Humble
+├── piper_bridge → piper_sdk → CAN → arm
+├── camera driver
+└── robot_state_publisher
+          ↕ ROS 2 / DDS
+Runtime container (--network host)
+└── your app
+```
+
+The host owns all hardware. Apps use ROS topics and have no device access. Runtime apps run as
+`dev`, with ROS and the app sourced, and no display. Dev and runtime images share the same ROS base;
+[check the runtime image](#4-build-the-runtime-image) before deployment to verify its dependencies.
+
+## 3. Test with MuJoCo
+
+**What:** Run your app against a simulated arm.
+
+**How:** Run the test script inside the devcontainer, then open the browser URL.
+
+**Expected result:** The example arm moves continuously and the terminal prints joint feedback.
+
+```bash
+cd ~/ws/src/PhyAI_Team2
+bash scripts/test_sim.sh example
+```
+
+Open **http://localhost:23517**. Press **Ctrl+C** to stop.
+
+### Select your app
+
+Install your app's declared ROS dependencies with `rosdep` and any `requirements.txt` packages first.
+Then run:
+
+```bash
+bash scripts/test_sim.sh <name>
+bash scripts/test_sim.sh          # select from a menu
+```
+
+The script builds the selected app and simulator, starts or reuses MuJoCo, then runs
+`apps/<name>/start.sh`. Your app controls motion through the [robot interface](#robot-interface).
+[example.py](apps/example/example_app/example_app/example.py) sends smooth arm/gripper targets at
+50 Hz and reports feedback once a second. `sim_cmd.sh` is optional for manual commands.
+
+### Browser access
+
+| Access | URL |
+|---|---|
+| On the dev PC | `http://localhost:23517` |
+| Another machine on the LAN | `http://<dev-pc-ip>:23517` |
+| Through SSH | Forward the port in VS Code's **Ports** panel, then use `http://localhost:23517` |
+
+Use the printed URL if you set another port. Rendering uses offscreen GPU/EGL and streams video;
+no desktop display is needed. The simulator is development-only; cameras and `/tf` are not simulated yet.
+Its model comes from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/agilex_piper).
+
+### ROS domain, port, and existing servers
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ROS_DOMAIN_ID` | `42` | Shared ROS domain for app and simulator |
+| `HTTP_PORT` | `23517` | Fixed browser port |
+
+Give each developer a domain separate from teammates and the real robot:
+
+```bash
+ROS_DOMAIN_ID=43 HTTP_PORT=23518 bash scripts/test_sim.sh <name>
+# Or set the domain for subsequent commands in this terminal:
+export ROS_DOMAIN_ID=43
+```
+
+If the port is occupied, the script prints the process name, PID, and command. It reuses our MuJoCo
+simulator only on the same ROS domain. Domain mismatches and unrelated servers produce instructions;
+the script does not switch ports or stop existing servers. If ownership is unavailable, inspect the
+listener on the host.
+
+Ctrl+C stops the app and any simulator the script started. A reused simulator stays running.
+
+### Run components manually
+
+For separate app and simulator terminals, set the same `ROS_DOMAIN_ID` in both. Build and source first:
+
 ```bash
 cd ~/ws
-colcon build --symlink-install --packages-select <your_pkg>
+colcon build --symlink-install --packages-select <your_pkg> piper_mujoco_sim
 source install/setup.bash
-ros2 launch <your_pkg> <file>.launch.py
-```
-Use your own `ROS_DOMAIN_ID` (`export ROS_DOMAIN_ID=<n>`) so you don't pick up teammates' nodes, or the real
-robot, on the same network.
-
-The dev PC has no host stack, so nothing publishes the robot topics there. Run the simulator below in a second
-terminal to provide them.
-
-### Simulator (MuJoCo, quick trial)
-The simulator is the only visualization tool. [sim/piper_mujoco_sim](sim/piper_mujoco_sim) loads the PIPER model
-from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/agilex_piper) and stands in
-for the control PC's host stack: it publishes `/joint_states` and follows `/joint_ctrl_single`, the same
-[Robot interface](#robot-interface) topics, so your app runs unchanged against it. It exists only in the dev image
-and is never deployed. Cameras and `/tf` aren't simulated yet.
-
-Start it in a second container terminal (it's built together with your app by `colcon build`):
-```bash
+export ROS_DOMAIN_ID=43
 ros2 launch piper_mujoco_sim sim.launch.py
 ```
-Then open the live view in a browser. The simulator renders on the dev PC's GPU and streams the picture, so no
-display or X server is needed:
-- **Local**: `http://localhost:23517`
-- **Remote**: `http://<dev-pc-ip>:23517` from any machine on the LAN, or `http://localhost:23517` through the port
-  VS Code forwards automatically (**Ports** panel, labelled *MuJoCo view*).
 
-Only one simulator can use a port. If a teammate on the same dev PC already runs one, pick another port with
-`ros2 launch piper_mujoco_sim sim.launch.py http_port:=<port>`, and use your own `ROS_DOMAIN_ID` too.
+In another terminal, source `~/ws/install/setup.bash`, set the same domain, and launch your app:
 
-Move the arm by hand to check the loop. Your app sends the same message:
 ```bash
-ros2 topic pub --once /joint_ctrl_single sensor_msgs/msg/JointState \
-  "{name: [joint1, joint7], position: [1.0, 0.03]}"     # rotate the base, open the gripper
+ros2 launch <your_pkg> <file>.launch.py
 ```
 
----
+For a manual motion check, run from the repo root with the same domain:
 
-## 3. Build
+```bash
+bash scripts/sim_cmd.sh joint1=0.8 joint7=0.03
+```
 
-Run these on the **dev PC's own shell**, not inside the devcontainer, from the repo root.
-- **Local**: a normal terminal on the dev PC.
-- **Remote**: an SSH session to the dev PC, or a VS Code terminal opened in a Remote-SSH window (not in the container).
+Stop any app continuously sending targets before manual commands, since its targets will overwrite them.
 
-1. Check that all dependencies are declared. Run this in the devcontainer:
-   ```bash
-   rosdep install --from-paths ~/ws/src/PhyAI_Team2/apps/<name> --ignore-src -y --simulate
-   ```
-2. Build the runtime image:
-   ```bash
-   scripts/build_runtime.sh <name>        # → phyai/app-<name>:latest
-   ```
-3. Run it locally the way the control PC will:
-   ```bash
-   docker run --rm -it --network host phyai/app-<name>
-   ```
-   If it fails here but works in the devcontainer, a dependency or file is missing. Go back to
-   [Rules for the app to deploy](#rules-for-the-app-to-deploy).
+## 4. Build the runtime image
 
-`--symlink-install` hides files missing from `data_files`, so step 3 is the real check.
+**What:** Package one app for deployment.
 
----
+**How:** Build from the repo root in the **dev PC host shell**, outside the devcontainer.
 
-## 4. Deploy
+**Expected result:** Docker image `phyai/app-<name>:latest`.
 
-### Control PC prerequisites
-- Docker, plus the NVIDIA Container Toolkit if apps use the GPU.
-- SSH access from your PC, with your user in the `docker` group.
-- The host stack (piper_bridge, camera driver, robot_state_publisher) running natively on ROS 2 Humble.
-  `run_runtime.sh` passes the shell's `ROS_DOMAIN_ID` (default `0`) to the app, so it must match the host stack's.
+```bash
+scripts/build_runtime.sh <name>
+```
 
-### Send and run
-1. From your PC, send the image. This also installs `~/phyai/run_runtime.sh` on the control PC:
-   ```bash
-   scripts/deploy.sh <name> <user>@<control-pc>
-   ```
-2. On the control PC, start the app:
-   ```bash
-   ~/phyai/run_runtime.sh <name>           # runs start.sh
-   ~/phyai/run_runtime.sh <name> bash      # or open a shell in the image for debugging
-   ```
-3. Stop it with Ctrl+C, or from another terminal:
-   ```bash
-   docker stop phyai-<name>
-   ```
+### Include CUDA and PyTorch
 
-Only one app may drive the arm at a time. `run_runtime.sh` refuses to start if another app is already running.
+**What:** Declare GPU dependencies per app.
 
-### Note: DDS transport between host and container
-The app runs as user `dev` (UID 1000), usually a different UID from the host stack's user. ROS 2's default
-shared-memory transport fails silently in that case: topics show up in `ros2 topic list`, but no data arrives.
-Runtime images therefore use a UDP-only Fast DDS profile by default ([docker/fastdds_udp.xml](docker/fastdds_udp.xml)).
-You don't need to do anything, but don't override `FASTRTPS_DEFAULT_PROFILES_FILE` in your app.
+**How:** Edit `apps/<name>/requirements.txt` and, if needed, `install_system_deps.sh`, then rebuild.
+
+**Expected result:** The build and runtime images contain the declared packages; no install is needed on startup.
+
+For example, a CUDA 12.4 PyTorch wheel can be declared in `requirements.txt`:
+
+```text
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+```
+
+This is an example version pair; select the wheel for your app and GPU using the
+[PyTorch installation instructions](https://pytorch.org/get-started/previous-versions/).
+For a separate CUDA Toolkit/compiler, adapt the commented recipe in
+[install_system_deps.sh](apps/example/install_system_deps.sh). The hook runs before pip installation,
+from a read-only directory containing dependency declarations; use `/tmp` for downloads and keep it self-contained.
+Its packages are included in the final image. Shell exports inside the hook do not persist to later stages.
+
+Devcontainer installs are not copied into runtime images. For local testing, apply the same declarations
+inside the devcontainer (`sudo bash apps/<name>/install_system_deps.sh`, then
+`pip3 install -r apps/<name>/requirements.txt`). The test runner does not install these automatically.
+The build needs network access for downloads; a prepared runtime image can run offline.
+The control PC still provides a compatible NVIDIA driver and Container Toolkit.
+
+### Check dependencies before building
+
+Inside the devcontainer:
+
+```bash
+rosdep install --from-paths ~/ws/src/PhyAI_Team2/apps/<name> --ignore-src -y --simulate
+```
+
+### Verify the built image
+
+In the dev PC host shell:
+
+```bash
+docker run --rm -it --network host -e ROS_DOMAIN_ID=43 phyai/app-<name>
+```
+
+Use your simulator's domain for feedback and motion testing. If the app works in development but
+fails here, check [dependencies and installed files](#dependencies-and-installed-files).
+`--symlink-install` can hide missing `data_files`, so test the actual runtime image.
+
+## 5. Run on the control PC
+
+**What:** Run a prepared runtime image against the control PC host stack.
+
+**How:** Start the app in the control PC shell.
+
+**Expected result:** The container runs `start.sh` and communicates with the robot through ROS topics.
+
+```bash
+# Control PC shell:
+~/phyai/run_runtime.sh <name>
+```
+
+### Control PC requirements
+
+- Docker; NVIDIA Container Toolkit if the app uses a GPU.
+- A user in the `docker` group.
+- The image `phyai/app-<name>:latest` and `~/phyai/run_runtime.sh` already available locally.
+- The host stack (piper_bridge, camera driver, robot_state_publisher) running on ROS 2 Humble.
+
+`run_runtime.sh` forwards the shell's `ROS_DOMAIN_ID` (default `0`); it must match the host stack.
+Only one app may drive the arm at a time; the runner refuses to start if another app is running.
+
+### Stop or debug
+
+Press Ctrl+C, or stop from another terminal. To debug, start a shell instead of the app:
+
+```bash
+docker stop phyai-<name>
+~/phyai/run_runtime.sh <name> bash
+```
+
+### DDS transport
+
+Different host/container user IDs can cause Fast DDS shared-memory transport to drop data even
+when topics are visible. Runtime images use [a UDP-only profile](docker/fastdds_udp.xml) to avoid this.
+Keep `FASTRTPS_DEFAULT_PROFILES_FILE` set to that profile.

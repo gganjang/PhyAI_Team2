@@ -17,7 +17,7 @@ setup(
     zip_safe=True,
     entry_points={
         'console_scripts': [
-            'heartbeat = example_app.heartbeat:main',
+            'example = example_app.example:main',
         ],
     },
 )

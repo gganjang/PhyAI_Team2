@@ -1,10 +1,13 @@
 # Base image for developing ROS 2 apps for the PIPER arm (perception / planning / application).
-# Host provides: Ubuntu 22.04 + NVIDIA driver. CUDA / PyTorch are left to each developer.
+# Host provides: Linux (e.g. Ubuntu 24.04) + NVIDIA driver. The Humble image includes Ubuntu 22.04.
+# App GPU/system dependencies: apps/<name>/install_system_deps.sh and requirements.txt.
 # Hardware (piper_sdk, CAN, camera driver) lives on the control PC host, not in these images.
 #
 # Stages (build context = repo root):
 #   base     minimal ROS 2 Humble; the common foundation of dev and runtime images
 #   dev      base + dev tools; used by .devcontainer
+#   deps     only one app's dependency declarations
+#   app-deps base + app system/pip dependencies, shared by build and runtime
 #   build    compiles one app (apps/<name>) with colcon
 #   runtime  base + the built app only; this is what ships to the control PC
 #
@@ -43,7 +46,7 @@ ARG USERNAME=dev
 
 # Dev tools only; the simulator (MuJoCo / Isaac Sim) is the visualization tool, so no RViz/desktop GUI here
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl wget vim less bash-completion \
+        git curl wget vim less bash-completion iproute2 net-tools \
         build-essential cmake python3-venv python3-vcstool \
         libegl1 libopengl0 python3-pil \
     && rm -rf /var/lib/apt/lists/*
@@ -76,36 +79,59 @@ WORKDIR /home/${USERNAME}/ws
 CMD ["bash"]
 
 # ---------------------------------------------------------------------------
-FROM base AS build
+FROM base AS deps
 
 # Folder name under apps/ to build
 ARG APP=example
 
-WORKDIR /ws
-COPY apps/${APP} src/${APP}
+# Keep only what decides the installed dependencies, in the same layout. The dependency layers below are
+# cached on this content, so a code change doesn't reinstall (or re-ship) them; only editing these files does.
+COPY apps/${APP} /tmp/app
+RUN mkdir /deps && cd /tmp/app \
+    && find . \( -name package.xml -o -name COLCON_IGNORE -o -name AMENT_IGNORE -o -name CATKIN_IGNORE \
+                 -o -path ./requirements.txt -o -path ./install_system_deps.sh \) -exec cp --parents {} /deps/ \;
 
-RUN apt-get update \
-    && rosdep update --rosdistro ${ROS_DISTRO} \
-    && rosdep install --from-paths src --ignore-src -y --rosdistro ${ROS_DISTRO} \
+# ---------------------------------------------------------------------------
+FROM base AS app-deps
+
+# Runs as root during image build, before compiling the app. Keep the hook self-contained.
+# These installed system/Python packages are inherited by both build and runtime stages.
+RUN --mount=type=bind,from=deps,source=/deps,target=/tmp/deps \
+    apt-get update \
+    && cd /tmp/deps \
+    && if [ -f install_system_deps.sh ]; then bash -eo pipefail install_system_deps.sh; fi \
+    && if [ -f requirements.txt ]; then pip3 install --no-cache-dir -r requirements.txt; fi \
     && rm -rf /var/lib/apt/lists/*
 
+# ---------------------------------------------------------------------------
+FROM app-deps AS build
+
+ARG APP=example
+
+WORKDIR /ws
+RUN --mount=type=bind,from=deps,source=/deps,target=/tmp/deps \
+    apt-get update \
+    && rosdep update --rosdistro ${ROS_DISTRO} \
+    && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro ${ROS_DISTRO} \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY apps/${APP} src/${APP}
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh \
     && colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ---------------------------------------------------------------------------
-FROM base AS runtime
+FROM app-deps AS runtime
 
 ARG APP=example
 ARG USERNAME=dev
 
-# Install only the run-time (exec) dependencies of the app's packages
-RUN --mount=type=bind,from=build,source=/ws/src,target=/tmp/src \
+# Install only the run-time (exec) dependencies of the app's packages.
+# System/pip dependencies are already inherited from app-deps.
+RUN --mount=type=bind,from=deps,source=/deps,target=/tmp/deps \
     apt-get update \
     && rosdep update --rosdistro ${ROS_DISTRO} \
-    && rosdep install --from-paths /tmp/src --ignore-src -y --rosdistro ${ROS_DISTRO} \
+    && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro ${ROS_DISTRO} \
          --dependency-types exec \
-    && if [ -f /tmp/src/${APP}/requirements.txt ]; then \
-         pip3 install --no-cache-dir -r /tmp/src/${APP}/requirements.txt; fi \
     && rm -rf /var/lib/apt/lists/* /root/.ros/rosdep
 
 COPY --from=build /ws/install /ws/install

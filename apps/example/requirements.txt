@@ -1,2 +1,7 @@
-# Extra pip packages for this app's runtime image (e.g. torch, numpy).
-# Don't add piper_sdk or other hardware drivers: the control PC host owns the hardware.
+# App Python dependencies: installed into both build and runtime images.
+# Pin the versions and CUDA wheel variant you tested. This example needs none.
+# Optional PyTorch + CUDA 12.4 example (uncomment only if your app uses it):
+# --extra-index-url https://download.pytorch.org/whl/cu124
+# torch==2.5.1+cu124
+# See https://pytorch.org/get-started/previous-versions/ for other tested combinations.
+# Hardware SDKs/drivers belong on the control PC host.
