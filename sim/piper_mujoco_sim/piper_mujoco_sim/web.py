@@ -63,6 +63,8 @@ def make_handler(hubs, editor=None, scene_editing=False, restart=None, workspace
                 try:
                     with urlopen(f'http://127.0.0.1:{workspace_port}{upstream_path}', timeout=2) as upstream:
                         self.respond(200, upstream.read(), upstream.headers.get('Content-Type', 'application/octet-stream'))
+                except (BrokenPipeError, ConnectionResetError):
+                    return  # The browser navigated away while the proxy was replying.
                 except (URLError, TimeoutError, OSError):
                     self.respond(503, b'Workspace viewer is unavailable. Check the workspace_viewer launch logs, then reload this page.', 'text/plain')
             elif request.path == '/stream':

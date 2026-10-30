@@ -1,0 +1,10 @@
+# Echo identities from the current discovery view_request.
+string session_id
+string request_id
+# arrived: verified physical arrival, then discovery waits for stationary feedback.
+# unreachable: no feasible view; discovery keeps uncertainty and selects another target.
+string outcome
+string reason
+---
+bool success
+string message

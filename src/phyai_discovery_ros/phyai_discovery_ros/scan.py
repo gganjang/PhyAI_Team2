@@ -11,6 +11,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from phyai_discovery_interfaces.srv import ReportView
 
 
 NAMES = [f'joint{i}' for i in range(1,8)]
@@ -51,13 +52,10 @@ class ScanNode(Node):
                 raise ValueError('Scan requires six finite joint_limits [lower, upper] pairs.')
         self.targets=scan['targets']
         self.survey_labels=set(config['viewpoints'])
-        self.targeted_inspection=bool(scan.get('targeted_inspection',False))
-        if scan_key=='scan' and self.targeted_inspection:
-            raise ValueError('Shared scan uses configured poses; dynamic inspection requires a geometry planner.')
-        self.max_views_per_block=scan.get('max_targeted_views_per_block',2)
-        if not isinstance(self.max_views_per_block,int) or isinstance(self.max_views_per_block,bool) or self.max_views_per_block<1:
-            raise ValueError('Targeted per-object view budget must be a positive integer.')
+        if scan_key=='scan' and scan.get('targeted_inspection', False):
+            raise ValueError('Use shared candidate_focus settings and a plan_view robot adapter.')
         self.planner=None
+        self.request_plans={}
         self.selected_targets={}
         self.inspection_focus=None
         self.duration=float(scan.get('move_seconds',4.))
@@ -69,8 +67,10 @@ class ScanNode(Node):
                        self.settle_seconds,self.max_speed,self.max_acceleration)):
             raise ValueError('Scan timing must be positive.')
         labels = config['viewpoints'] + [name for views in config.get('inspection_rounds',[]) for name in views]
-        if set(self.targets)!=set(labels):
-            raise ValueError('Every scan viewpoint requires a joint target.')
+        focus_enabled = config.get('candidate_focus', {}).get('enabled', False)
+        required = set(config['viewpoints']) if focus_enabled else set(labels)
+        if not required.issubset(self.targets) or not set(self.targets).issubset(labels):
+            raise ValueError('Survey poses are required; legacy fixed scans also need every reserve pose.')
         for values in self.targets.values():
             if len(values)!=7 or not np.isfinite(values).all():
                 raise ValueError('Scan targets must contain seven finite joints.')
@@ -82,6 +82,8 @@ class ScanNode(Node):
         self.wait_reason='Waiting for bridge feedback and discovery startup.'
         self.logged_wait=None
         self.client=self.create_client(Trigger,f'{interface_prefix}/capture')
+        self.view_client=self.create_client(ReportView,f'{interface_prefix}/report_view')
+        self.view_report_future=None
         self.finish_client=self.create_client(Trigger,f'{interface_prefix}/end_inspection')
         self.finish_future=None
         self.pub=self.create_publisher(JointState,self.command_topic,1)
@@ -99,6 +101,7 @@ class ScanNode(Node):
         self.active=self.initial=self.started=self.settled_since=None
         self.capture_future=None
         self.request_key=None
+        self.active_request_id=None
 
     def motion_time(self):
         return time.monotonic()
@@ -145,6 +148,7 @@ class ScanNode(Node):
             if self.session != session:
                 self.clear_motion();self.moved=False
                 self.selected_targets={};self.inspection_focus=None
+                self.request_plans={};self.view_report_future=None
                 self.finish_future=None
                 if self.planner is not None:self.planner.reset()
                 if self.fault_session != session:self.fault=None
@@ -170,10 +174,43 @@ class ScanNode(Node):
         msg.name=NAMES;msg.position=target
         self.pub.publish(msg)
 
+    def plan_view(self, request, current):
+        """Robot adapter hook: return feasible joints for the requested target.
+
+        Subclasses own IK, collision/visibility checks and view geometry only.
+        Candidate selection and budgets are owned by shared Discovery.
+        """
+        if request.get('focus') is not None:
+            raise NotImplementedError('Candidate inspection requires a robot view-planner adapter.')
+        return self.targets[request['viewpoint']]
+
     def select_target(self,label):
-        # Fixed, installation-validated survey and reserve poses. Environment
-        # extensions may override this to choose additional perceived-target views.
-        return self.targets[label]
+        request = self.discovery.get('view_request')
+        if request is None:
+            return self.targets[label]
+        if (request['session_id'] != self.session or request['viewpoint'] != label):
+            self.fault_stop('Discovery view request does not match the active scan.')
+            return None
+        key = request['request_id']
+        if key in self.request_plans:
+            return self.request_plans[key]
+        try:
+            target = self.plan_view(request, self.actual)
+        except NotImplementedError as error:
+            self.fault_stop(str(error))
+            return None
+        if target is not None:
+            self.request_plans[key] = list(target)
+            self.selected_targets[label] = list(target)
+        return target
+
+    def report_view(self, request, outcome, reason=''):
+        if not self.view_client.service_is_ready():
+            self.wait_reason = 'Waiting for discovery view-report service.'
+            return None
+        return self.view_client.call_async(ReportView.Request(
+            session_id=request['session_id'], request_id=request['request_id'],
+            outcome=outcome, reason=reason))
 
     def tick(self):
         now=time.monotonic()
@@ -207,26 +244,48 @@ class ScanNode(Node):
                 except Exception as error:self.fault_stop(str(error))
             return
         target_name=progress['target']
-        if self.active is not None and target_name!=self.active:
+        view_request=self.discovery.get('view_request')
+        request_id=view_request['request_id'] if view_request is not None else None
+        if self.view_report_future is not None:
+            self.wait_reason='Waiting for discovery to select the next view.'
+            if self.view_report_future.done():
+                try:self.view_report_future.result()
+                except Exception as error:self.fault_stop(str(error))
+                self.view_report_future=None
+            return
+        if self.active is not None and (target_name!=self.active or request_id!=self.active_request_id):
+            # A new request can reuse a slot after an unreachable candidate.
+            # Retire the old motion before accepting its replacement.
+            self.command(self.actual)
             self.clear_motion()
         if self.capture_future is not None:
             self.wait_reason='Waiting for capture acknowledgement.'
             if self.capture_future.done():
                 try:
                     result=self.capture_future.result()
-                    if not result.success:self.fault_stop('Capture request rejected: '+result.message)
+                    if not result.success:
+                        if view_request is None:self.fault_stop('Capture request rejected: '+result.message)
+                        else:self.clear_motion()
                 except Exception as error:self.fault_stop(str(error))
                 self.capture_future=None
             return
         if progress['state']!='wait_for_wrist_view':
             self.wait_reason='Discovery: '+progress['state'];return
-        key=(self.session,progress['viewpoint_index'],progress['rejected'])
+        if self.config.get('candidate_focus', {}).get('enabled', False) and view_request is None:
+            self.wait_reason='Waiting for the shared discovery view request.'
+            return
+        key=(self.session,progress['viewpoint_index'],progress['rejected'],request_id)
         if getattr(self,'request_key',None)==key:return
         if getattr(self,'request_key',None) is not None:
             self.clear_motion()
-        if target_name not in self.targets:
+        if target_name not in self.targets and not (view_request and view_request.get('focus')):
             self.fault_stop('No configured scan pose for '+target_name);return
         target=self.select_target(target_name)
+        if self.fault:return
+        if target is None and view_request is not None:
+            self.view_report_future=self.report_view(view_request, 'unreachable',
+                'Robot adapter found no feasible collision-free, visible view.')
+            return
         if target is None:
             self.wait_reason='Targeted views exhausted; preserving unresolved evidence.'
             if self.finish_client.service_is_ready():
@@ -236,7 +295,7 @@ class ScanNode(Node):
             limits=self.target_limits()
             if any(not low<=angle<=high for angle,(low,high) in zip(target[:6],limits)) or not 0<=target[6]<=.035:
                 self.fault_stop('Scan target exceeds PIPER joint limits.');return
-            self.active=target_name;self.initial=list(self.actual)
+            self.active=target_name;self.active_request_id=request_id;self.initial=list(self.actual)
             self.started=self.motion_time();self.settled_since=None
             self.active_duration=move_duration(self.initial,target,
                 self.duration if self.moved else self.approach_duration,
@@ -250,9 +309,11 @@ class ScanNode(Node):
         if elapsed>=self.active_duration and error<.025 and gripper_error<.002:
             self.wait_reason='Settling at '+target_name
             if self.settled_since is None:self.settled_since=self.motion_time()
-            if self.motion_time()-self.settled_since>=self.settle_seconds and self.client.service_is_ready():
+            ready=self.view_client.service_is_ready() if view_request is not None else self.client.service_is_ready()
+            if self.motion_time()-self.settled_since>=self.settle_seconds and ready:
                 self.request_key=key
-                self.capture_future=self.client.call_async(Trigger.Request())
+                self.capture_future=(self.report_view(view_request, 'arrived') if view_request is not None
+                                     else self.client.call_async(Trigger.Request()))
                 self.moved=True
                 self.wait_reason='Capturing '+target_name
                 self.get_logger().info('Capturing '+target_name)

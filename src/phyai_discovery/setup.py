@@ -4,6 +4,7 @@ setup(
     name='phyai_discovery',
     version='0.1.0',
     packages=find_packages(exclude=['test']),
+    package_data={'phyai_discovery.viewer': ['workspace.html']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/phyai_discovery']),
         ('share/phyai_discovery', ['package.xml', 'README.md']),

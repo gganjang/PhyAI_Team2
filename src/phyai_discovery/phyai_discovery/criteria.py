@@ -14,6 +14,7 @@ def inspection_targets(tracks, assessment):
         priority = (3 if track['id'] is None else 2 if not track['resolved'] or
                     (report and not report['checks']['resolved_views']) else 1)
         result.append({'id': track['id'] or track['hypothesis_id'],
+                       'candidate_id': track.get('hypothesis_id') or track['id'],
                        'position': list(track['position']), 'size': list(track['size']),
                        'priority': priority,
                        'supporting_views': track.get('supporting_views', [])})
@@ -24,6 +25,7 @@ def inspection_targets(tracks, assessment):
 class SearchCriteria:
     min_explored_fraction: float = .90
     min_resolved_views: int = 2
+    min_wrist_views: int = 0
     max_position_uncertainty: float = .01
     max_yaw_uncertainty: float = math.radians(5)
     min_coverage_gain: float = .005
@@ -39,6 +41,9 @@ class SearchCriteria:
         if any(not isinstance(v,int) or isinstance(v,bool) or v < 1
                for v in (self.min_resolved_views,self.max_no_progress_rounds)):
             raise ValueError('Search view and plateau counts must be positive integers.')
+        if (not isinstance(self.min_wrist_views, int) or isinstance(self.min_wrist_views, bool)
+                or self.min_wrist_views < 0):
+            raise ValueError('Minimum wrist views must be a nonnegative integer.')
 
     def assess(self, snapshot):
         reasons = []
@@ -57,14 +62,17 @@ class SearchCriteria:
         blocks = []
         for track in snapshot['tracks']:
             uncertainty = track.get('pose_uncertainty',{})
-            views = len(set(tuple(v) for v in track.get('supporting_views',[])))
+            supporting = set(tuple(v) for v in track.get('supporting_views',[]))
+            views = len(supporting)
+            wrist_views = sum(camera == 'wrist' for camera, _ in supporting)
             checks = {
                 'resolved_pose': bool(track['resolved'] and not track.get('alternatives')),
                 'resolved_views': views >= self.min_resolved_views,
+                'wrist_views': wrist_views >= self.min_wrist_views,
                 'position_bound': uncertainty.get('position_m',math.inf) <= self.max_position_uncertainty,
                 'yaw_bound': uncertainty.get('yaw_rad',math.inf) <= self.max_yaw_uncertainty}
             passed = all(checks.values())
-            blocks.append({'id':track['id'],'meets_criteria':passed,'checks':checks,'resolved_views':views})
+            blocks.append({'id':track['id'],'meets_criteria':passed,'checks':checks,'resolved_views':views,'wrist_views':wrist_views})
             if not passed:
                 reasons.append(track['id']+': '+', '.join(k for k,v in checks.items() if not v))
         # Support deficit provides progress even before an object meets every check.
@@ -72,6 +80,7 @@ class SearchCriteria:
         return {'met':not reasons,'reasons':reasons,'explored_fraction':coverage,
                 'min_explored_fraction':self.min_explored_fraction,
                 'min_resolved_views':self.min_resolved_views,
+                'min_wrist_views':self.min_wrist_views,
                 'max_position_uncertainty':self.max_position_uncertainty,
                 'max_yaw_uncertainty':self.max_yaw_uncertainty,
                 'blocks':blocks,'pending_hypotheses':len(pending),'support_count':support,

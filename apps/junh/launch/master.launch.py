@@ -16,7 +16,6 @@ def generate_launch_description():
         Node(package='junh_master',executable='discovery',output='screen',parameters=[{
             'config_path':LaunchConfiguration('config_path'),
             'recording_path':LaunchConfiguration('recording_path')}]),
-        Node(package='junh_master',executable='master',output='screen'),
         Node(package='junh_master',executable='workspace_viewer',output='screen',parameters=[{
             'http_port':ParameterValue(LaunchConfiguration('workspace_port'),value_type=int),
             'simulator_port':ParameterValue(LaunchConfiguration('simulator_port'),value_type=int)}]),

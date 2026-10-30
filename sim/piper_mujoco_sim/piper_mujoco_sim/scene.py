@@ -35,7 +35,7 @@ def scene_snapshot(model, data, config, paused=False, restart_id=0):
     """Simulator-only ground-truth poses for ROS example planning and checks."""
     from .inspection import scan_geometry
     return {
-        'simulation_time': float(data.time), 'paused': paused, 'restart_id': restart_id,
+        'frame_id': 'world', 'simulation_time': float(data.time), 'paused': paused, 'restart_id': restart_id,
         'scan_geometry': scan_geometry(model),
         'robot': {
             'base_position': model.body('base_link').pos.tolist(),
@@ -92,7 +92,8 @@ def build_scene(robot_path, config_path):
             ET.SubElement(world, 'geom', name=f'table_{row}_{column}', type='box',
                           pos=vector([x, y, -thickness / 2]),
                           size=vector([width / 2, depth / 2, thickness / 2]),
-                          rgba='.07 .075 .085 1', friction='0.8 .005 .0001')
+                          rgba=vector(config.get('table_rgba', [.07, .075, .085, 1.])),
+                          friction='0.8 .005 .0001')
             for dx in (-width / 2 + .04, width / 2 - .04):
                 for dy in (-depth / 2 + .04, depth / 2 - .04):
                     ET.SubElement(world, 'geom', type='box',
@@ -158,7 +159,9 @@ def build_scene(robot_path, config_path):
                   contype='0', conaffinity='0', density='0')
     camera(camera_mount, 'wrist', config['wrist_camera_position'],
            config['wrist_camera_quaternion'], wrist_camera=True)
-    colors = ['.72 .48 .25 1', '.85 .65 .36 1', '.65 .38 .18 1']
+    # Block colours are a scenario choice. Perception must not depend on them.
+    colors = [vector(rgba) for rgba in config.get('block_rgba', [
+        [.72, .48, .25, 1], [.85, .65, .36, 1], [.65, .38, .18, 1]])]
     block_qpos = []
     for index, (x, y) in enumerate(config['block_positions']):
         z = config['block_size'][2] / 2 + .001

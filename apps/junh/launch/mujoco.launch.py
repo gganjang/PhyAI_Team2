@@ -13,6 +13,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('http_port',default_value='23517'),
         DeclareLaunchArgument('auto_search',default_value='true'),
+        DeclareLaunchArgument('camera_width',default_value='640'),
+        DeclareLaunchArgument('camera_height',default_value='480'),
         DeclareLaunchArgument('scatter_on_start',default_value='true'),
         DeclareLaunchArgument('scatter_seed',default_value='-1'),
         DeclareLaunchArgument('scatter_table',default_value='all'),
@@ -20,8 +22,11 @@ def generate_launch_description():
         Node(package='junh_master',executable='sim_scan',output='screen',
              condition=IfCondition(LaunchConfiguration('auto_search'))),
         Node(package='piper_mujoco_sim',executable='sim',output='screen',parameters=[{
-            'publish_cameras':True,'camera_on_demand':True,'camera_rate':3.,
-            'camera_width':320,'camera_height':240,'view_width':960,'view_height':720,
+            'publish_cameras':True,'camera_on_demand':True,'camera_rate':30.,
+            'robot_mask_stationary_only':True,
+            'camera_width':ParameterValue(LaunchConfiguration('camera_width'),value_type=int),
+            'camera_height':ParameterValue(LaunchConfiguration('camera_height'),value_type=int),
+            'view_width':960,'view_height':720,
             'http_port':ParameterValue(LaunchConfiguration('http_port'),value_type=int),
             'scatter_on_start':ParameterValue(LaunchConfiguration('scatter_on_start'),value_type=bool),
             'scatter_seed':ParameterValue(LaunchConfiguration('scatter_seed'),value_type=int),

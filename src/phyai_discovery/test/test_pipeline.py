@@ -88,3 +88,18 @@ def test_processing_failure_uses_retry_budget_and_recovers():
     feature.process(capture(stamp=2.), stationary=True)
     assert feature.search.accepted == 1
     assert feature.workspace.revision == 1
+
+
+def test_explicit_additional_view_budget_preserves_scan_and_default_limit():
+    feature = Discovery({'viewpoints': ['left']})
+    session = feature.workspace.session
+    feature.finish()
+    for index in range(6):
+        assert feature.add_view(max_additional_views=6) == f'inspection_{index+1}'
+        assert feature.workspace.session == session
+        feature.finish()
+    with pytest.raises(ValueError, match='at most 6'):
+        feature.add_view(max_additional_views=6)
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match='positive integer'):
+            feature.add_view(max_additional_views=invalid)

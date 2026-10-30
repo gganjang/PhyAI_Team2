@@ -47,10 +47,13 @@ def test_capture_requested_once_while_discovery_progress_is_delayed(monkeypatch)
         node.scene={'paused':False,'simulation_time':1.,'robot':{'joints':[{'limits':[-3.,3.]} for _ in range(6)]}}
         node.scene_received=node.feedback_received=node.discovery_received=100.
         node.session='scan_1'
-        node.discovery={'search':{'state':'wait_for_wrist_view','target':target,'viewpoint_index':0,'rejected':0}}
+        node.discovery={'view_request':{'session_id':'scan_1','request_id':'survey-request',
+            'viewpoint':target,'focus':None,'phase':'survey'},
+            'search':{'state':'wait_for_wrist_view','target':target,'viewpoint_index':0,'rejected':0}}
         calls=[]
         future=SimpleNamespace(done=lambda:True,result=lambda:SimpleNamespace(success=True,message='ok'))
         node.client=SimpleNamespace(service_is_ready=lambda:True,call_async=lambda request:calls.append(request) or future)
+        node.view_client=node.client
         node.command=lambda values:None
         node.tick()
         node.scene['simulation_time']=10.;node.tick()
@@ -90,29 +93,35 @@ def test_restart_resumes_only_with_discovery_from_new_simulator_epoch():
     finally:node.destroy_node();rclpy.try_shutdown()
 
 
-def test_inspection_retries_reuse_physical_pose_until_a_new_label():
+def view_request(label='refine_1', candidate='weak', token='request_1'):
+    return {'schema_version':1,'session_id':'test','request_id':token,'viewpoint':label,
+            'phase':'candidate_inspection','camera':'wrist','frame':'world',
+            'focus':{'id':candidate,'candidate_id':candidate,'position':[.1,.2,.0075],
+                     'size':[.075,.025,.015],'priority':3},'criteria':{}}
+
+
+def test_robot_adapter_reuses_a_plan_only_for_the_same_shared_request():
     rclpy.init()
     node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
     try:
-        calls=[]
-        q=list(node.targets['inspection_1'])
+        q=node.targets['refine_1'];node.actual=q;node.session='test'
         node.scene={'scan_geometry':{'available':True}}
-        node.actual=q
-        node.discovery={'workspace':{'inspection_targets':[{'id':'weak'}]}}
-        node.planner=SimpleNamespace(
-            choose=lambda targets,current,label:calls.append(label) or {'joints':q,'focus':'weak','position':[.1,.2,.01]},
-            remember=lambda label,joints:None)
-        first=node.select_target('inspection_1')
-        node.clear_motion()
-        assert node.select_target('inspection_1')==first
-        assert calls==['inspection_1']
-        node.select_target('inspection_2')
-        assert calls==['inspection_1','inspection_2']
+        node.discovery={'view_request':view_request()}
+        calls=[]
+        node.planner=SimpleNamespace(choose=lambda targets,current,label:
+            calls.append((label,targets[0]['id'])) or {'joints':q,'focus':targets[0]['id'],'position':[.1,.2,.01]})
+        first=node.select_target('refine_1');node.clear_motion()
+        assert node.select_target('refine_1')==first
+        assert calls==[('refine_1','weak')]
+        # Discovery can replace an unreachable candidate in the same slot.
+        node.discovery={'view_request':view_request(candidate='other',token='request_2')}
+        node.select_target('refine_1')
+        assert calls==[('refine_1','weak'),('refine_1','other')]
     finally:
         node.destroy_node();rclpy.try_shutdown()
 
 
-def test_no_reachable_target_ends_inspection_once_without_moving(monkeypatch):
+def test_no_feasible_plan_is_reported_to_discovery_without_moving(monkeypatch):
     rclpy.init()
     node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
     try:
@@ -120,20 +129,49 @@ def test_no_reachable_target_ends_inspection_once_without_moving(monkeypatch):
         monkeypatch.setattr(shared_module,'time',SimpleNamespace(monotonic=lambda:100.))
         node.get_subscriptions_info_by_topic=lambda topic:[SimpleNamespace(node_name='piper_mujoco_sim')]
         node.scene={'scan_geometry':{'available':True},'paused':False}
-        node.actual=list(node.targets['inspection_1'])
-        node.scene_received=node.feedback_received=node.discovery_received=100.
-        node.session='test'
-        node.discovery={'workspace':{'inspection_targets':[{'id':'weak'}]},
-                        'search':{'state':'wait_for_wrist_view','target':'inspection_1',
-                                  'viewpoint_index':11,'rejected':0}}
+        node.actual=list(node.targets['refine_1'])
+        node.scene_received=node.feedback_received=node.discovery_received=100.;node.session='test'
+        node.discovery={'view_request':view_request(),
+                        'search':{'state':'wait_for_wrist_view','target':'refine_1','viewpoint_index':6,'rejected':0}}
         node.planner=SimpleNamespace(choose=lambda *args:None)
         calls=[]
         future=SimpleNamespace(done=lambda:True,result=lambda:SimpleNamespace(success=True))
-        node.finish_client=SimpleNamespace(service_is_ready=lambda:True,
+        node.view_client=SimpleNamespace(service_is_ready=lambda:True,
             call_async=lambda request:calls.append(request) or future)
-        node.command=lambda target:pytest.fail('No motion is allowed without a usable inspection pose')
+        node.command=lambda target:pytest.fail('An unreachable view must not move the robot')
         node.tick();node.tick()
         assert len(calls)==1
+        assert calls[0].outcome=='unreachable'
+        assert calls[0].request_id=='request_1'
         assert node.active is None
+    finally:
+        node.destroy_node();rclpy.try_shutdown()
+
+
+def test_survey_pose_is_executed_without_candidate_selection():
+    rclpy.init()
+    node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
+    try:
+        node.session='test';node.actual=node.targets['sweep_1']
+        req=view_request(label='sweep_1');req['focus']=None;req['phase']='survey'
+        node.discovery={'view_request':req}
+        node.planner=SimpleNamespace(choose=lambda *a:pytest.fail('Survey must not select a candidate'),remember=lambda *a:None)
+        assert node.select_target('sweep_1')==node.targets['sweep_1']
+    finally:
+        node.destroy_node();rclpy.try_shutdown()
+
+
+def test_simulator_only_plans_the_candidate_selected_by_shared_discovery():
+    rclpy.init()
+    node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
+    try:
+        node.session='test';node.actual=node.targets['refine_1'];node.scene={'scan_geometry':{'available':True}}
+        node.discovery={'view_request':view_request(candidate='b'),
+                        'workspace':{'inspection_targets':[{'id':'a'},{'id':'b'}]}}
+        selected=[]
+        node.planner=SimpleNamespace(choose=lambda targets,*a:selected.extend(t['id'] for t in targets) or None)
+        assert node.select_target('refine_1') is None
+        assert selected==['b']
+        assert not hasattr(node,'candidate_view_counts')
     finally:
         node.destroy_node();rclpy.try_shutdown()

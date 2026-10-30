@@ -10,7 +10,8 @@ from . import Discovery, Detector, DetectorConfig, SearchState
 def replay(path, config=None):
     manifest, base = load_manifest(path)
     discovery = Discovery({'map_frame': manifest['map_frame'],
-        'scope': manifest.get('scope'), 'viewpoints': manifest['viewpoints']},
+        'scope': manifest.get('scope'), 'viewpoints': manifest['viewpoints'],
+        'stacking_zone_position': manifest.get('stacking_zone_position')},
         detector=Detector(config or DetectorConfig()))
     search = discovery.search
     snapshots = []

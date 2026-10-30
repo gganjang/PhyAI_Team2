@@ -150,3 +150,11 @@ def test_cli_http_and_simulator_restart_restore_baseline(scene,client):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_discovery_scatter_does_not_reserve_a_stacking_zone(scene):
+    model, data, config, scatter = scene
+    expected = scatter.plan(config, seed=42)
+    # Moving an unused stacking marker must not change discovery layouts.
+    config = dict(config, stacking_zone_position=list(expected[0][:2]))
+    np.testing.assert_array_equal(scatter.plan(config, seed=42), expected)

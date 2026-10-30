@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and launch live MuJoCo RGB-D discovery from any working directory.
+# Build and launch live MuJoCo RGB-only discovery from any working directory.
 set -eo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +17,7 @@ case "${1:-}" in
         cat <<'HELP'
 Usage: apps/junh/run_sim.sh [--no-build]
 
-Build and start MuJoCo, discovery, master, and workspace viewer.
+Build and start MuJoCo, RGB discovery, swivel scan, and workspace viewer.
 --no-build reuses the existing workspace install.
 
 Environment: ROS_DOMAIN_ID (42), HTTP_PORT (23517), JUNH_WS (repository's workspace),
@@ -78,6 +78,8 @@ if [ ! -f "$SIM_WS/install/setup.bash" ]; then
 fi
 source "$SIM_WS/install/setup.bash"
 source "$APP_DIR/sam2_env.sh"
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 echo "MuJoCo search: http://localhost:$HTTP_PORT (ROS_DOMAIN_ID=$ROS_DOMAIN_ID, AUTO_SEARCH=$SCAN_MODE, SCATTER_BLOCKS=$SCATTER_MODE, SCATTER_SEED=$SCATTER_SEED_VALUE, SCATTER_TABLE=$SCATTER_TABLE_VALUE)"
 echo "App workspace map: http://localhost:$HTTP_PORT/workspace"
 exec ros2 launch junh_master mujoco.launch.py "http_port:=$HTTP_PORT" "auto_search:=$SCAN_MODE" "workspace_port:=$WORKSPACE_PORT" \

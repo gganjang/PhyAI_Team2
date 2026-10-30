@@ -95,6 +95,11 @@ Your app publishes targets; the simulator or control PC bridge receives them and
 The host stack administrator confirms provisional topics and camera names. Arm commands currently
 follow the `piper_ros` convention. If the bridge uses custom messages, add their package to the base image.
 
+The active [Junh discovery workflow](apps/junh/README.md) scatters blocks and
+uses RGB-only wrist-camera sweeps, with optional supporting overhead input.
+Color is not a block identity or proposal rule. Monitoring, judgement and stacking
+are retired from that app. Camera depth is not consumed by its RGB configuration.
+
 ### Use discovery in your own app
 
 The shared [discovery core](src/phyai_discovery/README.md) accepts calibrated RGB-D

@@ -17,7 +17,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-from phyai_discovery_interfaces.srv import GetBlockInfo
+from phyai_discovery_interfaces.srv import GetBlockInfo, ReportView
 from tf2_ros import Buffer, TransformListener, TransformException
 
 from phyai_discovery.observations import Capture, Intrinsics, decode_depth, load_capture, load_manifest
@@ -55,6 +55,8 @@ class DiscoveryNode(Node):
             manifest,self.recording_base = load_manifest(recording)
             self.recording_entries = manifest['captures']
             self.config.update(map_frame=manifest['map_frame'],viewpoints=manifest['viewpoints'],scope=manifest.get('scope'))
+            if 'stacking_zone_position' in manifest:
+                self.config['stacking_zone_position'] = manifest['stacking_zone_position']
         file_calibrations = {}
         if not recording:
             for camera, cfg in self.config['cameras'].items():
@@ -71,22 +73,30 @@ class DiscoveryNode(Node):
         self.workspace = self.discovery.workspace
         self.search = self.discovery.search
         self.detector = self.discovery.detector
+        self.rgb_only = self.config.get('detector', {}).get('backend') == 'rgb'
         self.stationarity = Stationarity(self.config.get('stationary_seconds',.5),
             self.config.get('stationary_tolerance',.003),self.config.get('feedback_timeout',1.))
         self.info = file_calibrations
         self.rgb = {}
+        self.stream_rgb = {}
         self.overlay_pubs = {camera:self.create_publisher(Image,f'{interface_prefix}/{camera}/overlay',1)
                              for camera in ('overhead','wrist')}
         self.masks = {}
         self.dynamic_masks = {}
         self.pending_depth = {}
-        self.worker = ThreadPoolExecutor(max_workers=1,thread_name_prefix='depth_geometry')
+        self.worker = ThreadPoolExecutor(max_workers=1,thread_name_prefix='discovery_geometry')
         self.future = None
         self.job = None
         self.request_stamp = self.get_clock().now().nanoseconds/1e9
         self.last_error = None
         self.logged_status = None
         self.last_source_received = {}
+        self.input_samples = {}
+        self.input_totals = {}
+        self.detection_samples = {}
+        self.detection_totals = {}
+        self.last_detection_seconds = None
+        self.job_started = None
         self.data_pub = self.create_publisher(String,f'{interface_prefix}/{inventory_name}',1)
         self.progress_pub = self.create_publisher(String,f'{interface_prefix}/search_progress',1)
         self.camera_request_pub = self.create_publisher(String,self.config['sim_camera_request_topic'],1) if self.config.get('sim_camera_request_topic') and self.recording_entries is None else None
@@ -94,6 +104,7 @@ class DiscoveryNode(Node):
             QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_service(GetBlockInfo,f'{interface_prefix}/get_block_info',self.get_block_info)
         self.create_service(Trigger,f'{interface_prefix}/capture',self.capture_service)
+        self.create_service(ReportView,f'{interface_prefix}/report_view',self.report_view_service)
         self.create_service(Trigger,f'{interface_prefix}/restart_scan',self.restart_service)
         self.create_service(Trigger,f'{interface_prefix}/finish_scan',self.finish_service)
         self.create_service(Trigger,f'{interface_prefix}/end_inspection',self.end_inspection_service)
@@ -106,21 +117,32 @@ class DiscoveryNode(Node):
             self.tf_listener = TransformListener(self.tf,self)
             self.create_subscription(JointState,'joint_states',self.on_joints,sensor_qos)
             for camera,cfg in self.config['cameras'].items():
+                reliability = self.config.get('image_reliability', 'best_effort')
+                if reliability not in ('best_effort', 'reliable'):
+                    raise ValueError('Image reliability must be best_effort or reliable.')
+                image_qos = QoSProfile(depth=1, reliability=(ReliabilityPolicy.RELIABLE
+                    if reliability == 'reliable' else ReliabilityPolicy.BEST_EFFORT))
                 if camera not in ('overhead','wrist'):
                     raise ValueError('Only overhead and wrist camera roles are supported.')
                 if cfg.get('mask'):
                     self.masks[camera] = np.load(config_path.parent/cfg['mask'],allow_pickle=False)
                 if cfg.get('mask_topic'):
                     self.create_subscription(Image,cfg['mask_topic'],
-                        lambda msg,camera=camera:self.on_mask(camera,msg),sensor_qos)
+                        lambda msg,camera=camera:self.on_mask(camera,msg),image_qos)
+                if cfg.get('stream_rgb_topic'):
+                    self.create_subscription(Image,cfg['stream_rgb_topic'],
+                        lambda msg,camera=camera:self.on_stream_rgb(camera,msg),image_qos)
                 if cfg.get('rgb_topic'):
                     self.create_subscription(Image,cfg['rgb_topic'],
-                        lambda msg,camera=camera:self.on_rgb(camera,msg),sensor_qos)
+                        lambda msg,camera=camera:self.on_rgb(camera,msg),image_qos)
                 if not cfg.get('intrinsics_file') and cfg.get('info_topic'):
                     self.create_subscription(CameraInfo,cfg['info_topic'],
-                        lambda msg,camera=camera:self.on_info(camera,msg),sensor_qos)
-                self.create_subscription(Image,cfg['depth_topic'],
-                    lambda msg,camera=camera:self.on_depth(camera,msg),sensor_qos)
+                        lambda msg,camera=camera:self.on_info(camera,msg),image_qos)
+                if not self.rgb_only:
+                    self.create_subscription(Image,cfg['depth_topic'],
+                        lambda msg,camera=camera:self.on_depth(camera,msg),image_qos)
+                elif not cfg.get('rgb_topic'):
+                    raise ValueError('RGB discovery requires an RGB topic for each camera.')
         self.create_timer(.05,self.tick)
         self.create_timer(.2,self.publish_progress)
         self.create_timer(1.,self.publish)
@@ -162,7 +184,8 @@ class DiscoveryNode(Node):
 
     def on_sim_scene(self,msg):
         try:
-            restart=json.loads(msg.data)['restart_id']
+            scene=json.loads(msg.data)
+            restart=scene['restart_id']
             if not isinstance(restart,int) or restart<0:return
             if self.sim_restart_id is not None and restart<self.sim_restart_id:return
             changed=self.sim_restart_id is not None and restart!=self.sim_restart_id
@@ -172,6 +195,9 @@ class DiscoveryNode(Node):
                 self.publish_progress()
                 self.publish()
                 self.get_logger().info('Simulator restarted; cleared map and restarted discovery.')
+            zone=scene.get('stacking',{}).get('zone')
+            if zone is not None and self.config.get('import_stacking_zone', True):
+                self.discovery.set_stacking_zone(zone['stacking_zone_position'], frame=scene['frame_id'])
         except (ValueError,TypeError,KeyError):pass
 
     def on_joints(self,msg):
@@ -190,20 +216,48 @@ class DiscoveryNode(Node):
         self.dynamic_masks.setdefault(camera,deque(maxlen=4)).append(
             (Time.from_msg(msg.header.stamp).nanoseconds/1e9,msg.header.frame_id,mask))
 
+    def record_input(self, camera):
+        now = time.monotonic()
+        self.last_source_received[camera] = now
+        self.input_samples.setdefault(camera, deque(maxlen=120)).append(now)
+        self.input_totals[camera] = self.input_totals.get(camera, 0)+1
+
+    def on_stream_rgb(self, camera, msg):
+        if msg.encoding not in ('rgb8', 'bgr8') or msg.step < msg.width*3 or len(msg.data) != msg.height*msg.step:
+            return
+        self.record_input(camera)
+        rgb = np.ndarray((msg.height,msg.width,3), dtype=np.uint8, buffer=msg.data,
+                         strides=(msg.step,3,1))
+        if msg.encoding == 'bgr8':
+            rgb = rgb[:,:,::-1]
+        rgb.setflags(write=False)
+        self.stream_rgb[camera] = rgb
+
     def on_rgb(self,camera,msg):
         if msg.encoding not in ('rgb8','bgr8') or msg.step < msg.width*3 or len(msg.data) != msg.height*msg.step:
             return
-        rgb = np.ndarray((msg.height,msg.width,3),dtype=np.uint8,buffer=bytes(msg.data),
-                         strides=(msg.step,3,1)).copy()
+        if not self.config['cameras'][camera].get('stream_rgb_topic'):
+            self.record_input(camera)
+        # Keep just the newest immutable view of the ROS-owned buffer. A capture
+        # retains its array's backing buffer while its worker uses it.
+        rgb = np.ndarray((msg.height,msg.width,3),dtype=np.uint8,buffer=msg.data,
+                         strides=(msg.step,3,1))
         if msg.encoding == 'bgr8':
-            rgb = rgb[:,:,::-1].copy()
+            rgb = rgb[:,:,::-1]
+        rgb.setflags(write=False)
         self.rgb[camera] = (Time.from_msg(msg.header.stamp).nanoseconds/1e9,msg.header.frame_id,rgb)
+        if self.rgb_only:
+            self.on_image(camera, msg)
 
     def on_info(self,camera,msg):
         if not self.config['cameras'][camera].get('intrinsics_file'):
             self.info[camera] = msg
 
     def on_depth(self,camera,msg):
+        if not self.rgb_only:
+            self.on_image(camera, msg)
+
+    def on_image(self,camera,msg):
         now = time.monotonic()
         self.last_source_received[camera] = now
         if self.future is not None or not self.stationarity.ready(now):
@@ -222,19 +276,20 @@ class DiscoveryNode(Node):
             if info is None:
                 raise ValueError('Waiting for matching camera calibration.')
             if info.header.frame_id != msg.header.frame_id or (info.width,info.height) != (msg.width,msg.height):
-                raise ValueError('Depth image and CameraInfo frame/dimensions differ.')
+                raise ValueError('Image and CameraInfo frame/dimensions differ.')
             cfg = self.config['cameras'][camera]
             if not np.isfinite(list(info.d)).all():
                 raise ValueError('Invalid camera distortion calibration.')
             distorted = any(abs(d) > 1e-9 for d in info.d)
             rectified = cfg.get('rectified',True)
             if distorted and (not rectified or info.p[0] <= 0 or info.p[5] <= 0):
-                raise ValueError('Distorted depth requires a rectified stream and calibrated projection matrix.')
+                raise ValueError('Distorted image requires a rectified stream and calibrated projection matrix.')
             p = info.p if rectified else [0.]*12
             k = Intrinsics(info.width,info.height,p[0] if p[0] > 0 else info.k[0],
                 p[5] if p[5] > 0 else info.k[4],p[2] if p[0] > 0 else info.k[2],
                 p[6] if p[5] > 0 else info.k[5])
-            depth = decode_depth(msg.data,msg.width,msg.height,msg.step,msg.encoding,
+            depth = None if self.rgb_only else decode_depth(
+                msg.data,msg.width,msg.height,msg.step,msg.encoding,
                 bool(msg.is_bigendian),cfg.get('depth_scale',.001))
             tf = self.tf.lookup_transform(self.workspace.frame,msg.header.frame_id,Time.from_msg(msg.header.stamp))
             digest = hashlib.sha256(json.dumps([list(info.k),list(info.p),list(info.d),
@@ -265,8 +320,22 @@ class DiscoveryNode(Node):
 
     def submit(self,capture):
         self.job = self.discovery.begin(capture, stationary=True)
+        self.job_started = time.monotonic()
         self.future = self.worker.submit(self.detector.detect,capture)
         self.last_error = None
+
+    def report_view_service(self, request, response):
+        try:
+            response.success = self.discovery.report_view(request.request_id, request.outcome,
+                session_id=request.session_id, now=time.monotonic(), reason=request.reason)
+            if response.success and request.outcome == 'arrived':
+                self.request_stamp = self.get_clock().now().nanoseconds/1e9
+            response.message = (self.search.reason if response.success
+                                else 'View report is stale or no longer applicable.')
+        except ValueError as error:
+            response.success, response.message = False, str(error)
+        self.publish_progress()
+        return response
 
     def capture_service(self,request,response):
         try:
@@ -317,12 +386,16 @@ class DiscoveryNode(Node):
         if self.future is None:
             for camera,msg in list(self.pending_depth.items()):
                 self.pending_depth.pop(camera,None)
-                self.on_depth(camera,msg)
+                self.on_image(camera,msg)
         if self.future is not None and self.future.done():
             future,self.future = self.future,None
             job,self.job = self.job,None
             try:
                 detection = future.result()
+                finished = time.monotonic()
+                self.last_detection_seconds = finished-self.job_started
+                self.detection_samples.setdefault(job.capture.camera, deque(maxlen=120)).append(finished)
+                self.detection_totals[job.capture.camera] = self.detection_totals.get(job.capture.camera, 0)+1
                 if self.discovery.complete(job,detection):
                     self.publish_overlay(job.capture,detection)
             except Exception as error:
@@ -366,20 +439,57 @@ class DiscoveryNode(Node):
         msg.data = pixels.tobytes()
         self.overlay_pubs[capture.camera].publish(msg)
 
+    def camera_rates(self):
+        now = time.monotonic()
+        def rate(samples):
+            if len(samples) < 2 or now-samples[-1] > 2.:
+                return 0.
+            return (len(samples)-1)/max(samples[-1]-samples[0], 1e-6)
+        return {camera: {
+            'received_hz': rate(self.input_samples.get(camera, ())),
+            'received_frames': self.input_totals.get(camera, 0),
+            'detection_hz': rate(self.detection_samples.get(camera, ())),
+            'detected_frames': self.detection_totals.get(camera, 0),
+        } for camera in self.config.get('cameras', {})}
+
+    def candidate_progress(self):
+        confirmed = len(self.workspace.tracks)
+        total = len(self.workspace.hypotheses)
+        survey = self.search.index < len(self.search.base_viewpoints) and not self.search.inspection_round
+        phase = ('finished' if self.search.state == SearchState.FINISHED else
+                 'survey' if survey else 'candidate_inspection')
+        return {'phase': phase, 'candidate_count': total,
+                'confirmed_blocks': confirmed, 'unconfirmed_candidates': total-confirmed,
+                'pending_inspections':len(inspection_targets(self.workspace.hypotheses, self.search.assessment)),
+                'count_is_final': False}
+
     def publish_progress(self):
         self.state_pub.publish(String(data=json.dumps(self.state_info())))
         mode='live' if self.recording_entries is None else 'recorded'
+        progress = self.search.progress()
+        tracks = self.workspace.hypotheses
+        if self.search.state == SearchState.FINISHED:
+            final = self.discovery.snapshot()
+            progress = final['search']
+            tracks = final['workspace']['tracks']+final['workspace']['hypotheses']
         self.progress_pub.publish(String(data=json.dumps({
             'workspace':{'session_id':self.workspace.session,
-                         'inspection_targets':inspection_targets(self.workspace.hypotheses,self.search.assessment)},
-            'search':self.search.progress(),'input_mode':mode,'last_error':self.last_error,
+                         'inspection_targets':inspection_targets(tracks,progress['assessment'])},
+            'search':progress,'view_request':self.discovery.view_request(),
+            'candidate_focus':self.discovery.focus.snapshot() if self.discovery.focus is not None else None,
+            'discovery_progress':self.candidate_progress(),'input_mode':mode,'last_error':self.last_error,
             'sim_restart_id':self.sim_restart_id})))
         if self.camera_request_pub is not None:
             camera=None
-            if self.stationarity.ready(time.monotonic()) and self.future is None:
+            if self.config.get('continuous_camera_stream', False):
+                if self.search.state != SearchState.FINISHED:
+                    camera = 'overhead' if self.search.state == SearchState.OVERHEAD else 'wrist'
+            elif self.stationarity.ready(time.monotonic()) and self.future is None:
                 if self.search.state == SearchState.OVERHEAD:camera='overhead'
                 elif self.search.state == SearchState.CAPTURE:camera='wrist'
-            self.camera_request_pub.publish(String(data=json.dumps({'camera':camera})))
+            capture = (self.rgb_only and self.stationarity.ready(time.monotonic())
+                       and self.future is None and self.search.state in (SearchState.OVERHEAD, SearchState.CAPTURE))
+            self.camera_request_pub.publish(String(data=json.dumps({'camera':camera, 'capture':capture})))
 
     def publish(self):
         stamp = self.get_clock().now().nanoseconds/1e9 if self.recording_entries is None else None
@@ -387,6 +497,9 @@ class DiscoveryNode(Node):
                     'input_mode':'live' if self.recording_entries is None else 'recorded',
                     'sim_restart_id':self.sim_restart_id,
                     'last_error':self.last_error,
+                    'discovery_progress':self.candidate_progress(),
+                    'camera_rates':self.camera_rates(),
+                    'last_detection_seconds':self.last_detection_seconds,
                     'stationary_feedback_ready':self.stationarity.ready(time.monotonic()) if self.recording_entries is None else None,
                     'camera_stream_ages':{camera:time.monotonic()-received for camera,received in self.last_source_received.items()}}
         status = (self.search.state.value,self.search.accepted,self.search.rejected,self.last_error)

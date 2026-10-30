@@ -87,6 +87,10 @@ class Workspace:
         self.warnings = list(dict.fromkeys(self.warnings + detection.warnings))
         self.revision += 1
         if detection.plane is None:
+            # RGB pose evidence can associate objects without a measured plane.
+            # It contributes no table geometry or explored-surface coverage.
+            if detection.candidates:
+                self._associate(detection)
             return
         if self.table is None:
             self.table = dict(detection.plane)

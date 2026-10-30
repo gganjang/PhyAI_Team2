@@ -70,35 +70,34 @@ class SimScanNode(ScanNode):
                 self.planner.sync(scene['scan_geometry'])
         except (ValueError,KeyError,TypeError):self.scene=None
 
-    def select_target(self,label):
-        if label in self.selected_targets:
-            return self.selected_targets[label]
-        target=self.targets[label]
-        self.inspection_focus=None
-        if self.targeted_inspection and label not in self.survey_labels and self.scene.get('scan_geometry'):
-            if self.planner is None:
-                import mujoco
-                from piper_mujoco_sim.inspection import InspectionPlanner
-                from piper_mujoco_sim.scene import build_scene
-                model=mujoco.MjModel.from_xml_string(build_scene(
-                    self.get_parameter('robot_path').value,self.get_parameter('scene_config').value))
-                self.planner=InspectionPlanner(model,list(self.targets.values()),self.max_views_per_block)
-                self.planner.sync(self.scene['scan_geometry'])
-                for name,joints in self.selected_targets.items():self.planner.remember(name,joints)
-            focus=self.discovery['workspace'].get('inspection_targets',[])
-            plan=self.planner.choose(focus,self.actual,label)
-            if plan:
-                target=plan['joints'];self.inspection_focus=plan
-                self.get_logger().info(f'Inspection {label}: focus {plan["focus"]} at {plan["position"]}')
-            else:
-                if focus:
-                    self.selected_targets[label]=None
-                    self.get_logger().info(f'Inspection {label}: no clear novel targeted pose remains; stopping partial.')
-                    return None
-                self.get_logger().info(f'Inspection {label}: no uncertain objects; using coverage reserve.')
-        self.selected_targets[label]=list(target)
-        if self.planner is not None:self.planner.remember(label,target)
-        return self.selected_targets[label]
+    def plan_view(self, request, current):
+        """Plan geometry for the single target selected by shared discovery."""
+        label = request['viewpoint']
+        focus = request.get('focus')
+        if focus is None:
+            target = self.targets[label]
+            self.selected_targets[label] = list(target)
+            if self.planner is not None:self.planner.remember(label, target)
+            return target
+        if not self.scene.get('scan_geometry'):
+            return None
+        if self.planner is None:
+            import mujoco
+            from piper_mujoco_sim.inspection import InspectionPlanner
+            from piper_mujoco_sim.scene import build_scene
+            model=mujoco.MjModel.from_xml_string(build_scene(
+                self.get_parameter('robot_path').value,self.get_parameter('scene_config').value))
+            self.planner=InspectionPlanner(model,list(self.targets.values()),None,
+                                           gripper=self.scan.get('gripper_position', 0.),
+                                           rgb_mask_clearance=True)
+            self.planner.sync(self.scene['scan_geometry'])
+            for name,joints in self.selected_targets.items():self.planner.remember(name,joints)
+        plan=self.planner.choose([focus],current,label)
+        self.inspection_focus=plan
+        if plan:
+            self.get_logger().info(f'Inspection {label}: focus {plan["focus"]} at {plan["position"]}')
+            return plan['joints']
+        return None
 
 
 def main(args=None):
