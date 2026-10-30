@@ -36,12 +36,12 @@
   ],
   "robot_yaw_degrees": 145,
   "overhead_position": [
-    0.2,
-    0.08,
+    0.1392,
+    0.5083,
     0.89
   ],
   "camera_fovy": 54,
-  "overhead_camera_fovy": 40.0,
+  "overhead_camera_fovy": 33.0,
   "wrist_camera_position": [
     0.02,
     0.02,
@@ -55,15 +55,15 @@
   ],
   "wrist_camera_roll_degrees": 0,
   "wrist_camera_mount_position": [
-    0.04,
-    -0.1,
-    0.0
+    0.0457,
+    -0.0997,
+    0.0096
   ],
   "wrist_camera_mount_quaternion": [
-    0.9762960071199334,
-    0.0,
-    0.0,
-    0.21643961393810288
+    0.977531,
+    0.012536,
+    -0.006185,
+    0.210326
   ],
   "block_size": [
     0.075,
@@ -103,9 +103,17 @@
     ]
   ],
   "overhead_quaternion": [
-    0.9990482215818578,
-    0.043619387365336,
+    0.986155,
+    -0.165756,
+    0.000134,
+    -0.004789
+  ],
+  "home_joints": [
+    -0.9599,
+    0.737,
     0.0,
+    0.0,
+    -0.0268,
     0.0
   ]
 }

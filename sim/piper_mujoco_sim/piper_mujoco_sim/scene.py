@@ -170,6 +170,13 @@ def build_scene(robot_path, config_path):
                       condim='4', rgba=colors[index % len(colors)])
         block_qpos.extend([x, y, z, 1, 0, 0, 0])
     # Free bodies add seven position values each; preserve the arm's home pose.
+    # home_joints (joint1-6) replaces the Menagerie home to match the lab's start pose.
+    home = config.get('home_joints')
     for key in root.findall('./keyframe/key'):
+        if home is not None and key.get('name') == 'home':
+            for attribute in ('qpos', 'ctrl'):
+                values = key.get(attribute, '').split()
+                values[:6] = [str(value) for value in home]
+                key.set(attribute, ' '.join(values))
         key.set('qpos', key.get('qpos', '') + ' ' + vector(block_qpos))
     return ET.tostring(root, encoding='unicode')

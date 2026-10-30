@@ -214,8 +214,10 @@ a PIPER arm mounted near the combined table center, and six movable 7.5 × 2.5 �
 Open the browser and select **Overview**, **Overhead camera**, or **Wrist camera**.
 The overview includes an X/Y/Z orientation gizmo; the overhead view shows X/Y.
 The arrows indicate positive world directions: X red, Y green, and Z blue.
-The overhead lens is 89 cm above the tabletop, looking straight down from
-X = -3 cm and Y = +2 cm relative to the combined table center. The wrist camera follows `link6`.
+The overhead lens is 89 cm above the tabletop at X = +14 cm and Y = +51 cm relative to the
+combined table center, tilted 19° from vertical back toward the robot, with a 33° vertical field of view.
+The arm starts in `home_joints` (joint1-6, rad), the lab's start pose with the gripper pointing
+along +Y (parallel to the table seam at X = 0). Both were fitted to lab photos on 2026-10-30 and are estimates. The wrist camera follows `link6`.
 These are ideal RGB browser views, not an SR305 sensor/noise simulation or ROS RGB-D streams.
 Four overhead lights, ambient room fill, and camera-facing fill illuminate the scene.
 The `lighting` settings in `lab_scene.json` control ceiling height above the tabletop
