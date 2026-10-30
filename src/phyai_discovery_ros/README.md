@@ -14,6 +14,23 @@ bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
   with_viewer:=true viewer_port:=23518 auto_scan:=false
 ```
 
+For a package-only handoff, share `src/phyai_discovery`,
+`src/phyai_discovery_interfaces`, and `src/phyai_discovery_ros`. The repository
+shell launchers are conveniences; the installed packages also provide SAM2 setup:
+
+```bash
+# After building/sourcing those packages and editing /tmp/team-discovery.json:
+python3 -m phyai_discovery.setup_sam2 \
+  --runtime-dir "$HOME/.cache/phyai-discovery" --config /tmp/team-discovery.json
+source "$HOME/.cache/phyai-discovery/env.sh"
+ros2 launch phyai_discovery_ros discovery.launch.py \
+  with_viewer:=true viewer_port:=23518 auto_scan:=false
+```
+
+SAM2 setup needs network access on first use; existing environments/checkpoints
+can be reused with `--venv` and `--checkpoint`. Viewer-only consumers need neither
+SAM2 nor robot motion: use the standalone viewer command below.
+
 Open **http://localhost:23518**. The map, candidate count, uncertainty and final
 inventory work on hardware without a simulator. If needed, forward this loopback
 HTTP port over SSH or through your IDE. Set `simulator_port:=23517` only when a
@@ -514,22 +531,6 @@ is available. Then run transport tests from the repository root:
 PYTHONPATH=src/phyai_discovery:src/phyai_discovery_ros \
   python3 -m pytest -q src/phyai_discovery_ros/test
 ```
-
-### Stack ordering in the final inventory
-
-Set `stacking_zone_position: [x, y]` in the installation JSON using metres in
-`map_frame`; the supplied hardware template leaves it null until measured.
-After completion, `GetBlockInfo` and workspace publications use `block_basement`
-for the closest confirmed block, then `block_1` through `block_(N-1)`, ordered by
-XY center distance to the target. Query `{block_id: "block_basement"}` for the
-first block. `track_id` retains the original association identity, and
-`stack_index`/`distance_to_stacking_zone` expose the order and distance.
-
-The simulator supplies live target metadata from the viewer in `world`; the
-adapter requires it to match `map_frame`. Target changes increment the workspace
-revision and recalculate the order, so consumers must invalidate older plans.
-The same order is shown in Junh's final block list and map labels. During search,
-IDs remain association IDs; missing target coordinates leave stack naming unassigned.
 
 ## Shared candidate-focus configuration and adapter contract
 

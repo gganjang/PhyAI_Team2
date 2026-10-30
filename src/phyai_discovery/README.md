@@ -274,29 +274,3 @@ multiple camera positions, stable identities, and checks against ground truth.
 Source ROS and a built workspace to include ROS adapter tests. Actual SAM2 tests
 additionally require the local SAM2 environment and checkpoint, as documented in
 [`apps/junh/README.md`](../../apps/junh/README.md).
-
-### Stacking order names
-
-Configure `stacking_zone_position: [x, y]` in metres in `map_frame`. When search
-finishes, the public inventory is sorted by planar center-to-center distance
-from the zone. The nearest confirmed block is `block_basement`; the remaining
-blocks are `block_1` through `block_(N-1)`. These names appear in public `id` and
-`name`, with `stack_index` (zero for the basement), `distance_to_stacking_zone`
-in metres, and the original association identity in `track_id`. Exact distance
-ties use X, then Y, then tracking ID. Z does not affect the order.
-
-Association IDs remain unchanged inside discovery. Final task names are assigned
-only after search finishes and are scoped to the scan session and revision.
-Restarting or adding inspection views requires using the next finished inventory.
-Changing the target increments the revision and recalculates final names; discard
-previous task plans when the target/session/revision changes. The workspace
-`stacking_order` records the target, frame, assignment status and ordered IDs.
-Without configured target coordinates, names remain association IDs and
-`stacking_order.assigned` is false. Provisional hypotheses never receive stack
-names; pose uncertainty and `pick_ready: false` remain part of the handoff.
-
-In simulation, the ROS adapter obtains only the target coordinates and frame
-from `/sim/scene`; block count, IDs and poses still come from measured images.
-For hardware, set the measured target coordinates in discovery's map frame in
-the installation configuration. Offline recording manifests may also contain
-`stacking_zone_position` in the manifest's map frame.

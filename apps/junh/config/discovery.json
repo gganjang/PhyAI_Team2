@@ -1,6 +1,5 @@
 {
   "map_frame": "base_link",
-  "stacking_zone_position": null,
   "viewpoints": [
     "wrist_1",
     "wrist_2"

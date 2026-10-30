@@ -92,7 +92,8 @@ python3 -m pytest -q src/phyai_discovery/test src/phyai_discovery_ros/test \
 The focused test runner offers `discovery`, `rgb`, `ros`, `scan`, `scene`,
 `viewer`, `sam2`, and `all` groups, for example `scripts/test.sh scan scene`.
 Retired stacking, monitoring, judgement, verification-fixture and camera-designer
-tests have been removed. Shared depth-consumer tests remain because that public
+tests have been removed, along with retired stacking configurations, launchers,
+verification scripts, and delivery plans. Shared depth-consumer tests remain because that public
 API is still supported separately from this RGB-only app.
 
 The survey geometry regression checks complete block-top visibility at 100
