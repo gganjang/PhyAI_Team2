@@ -2,7 +2,7 @@
 <package format="3">
   <name>junh_master</name>
   <version>0.1.0</version>
-  <description>RGB-D block discovery, automatic MuJoCo swivel scan, workspace viewer, and master handoff.</description>
+  <description>RGB-only block discovery, automatic MuJoCo wrist swivel scan, and workspace viewer.</description>
   <maintainer email="junhjang@keti.re.kr">PhyAI Team2</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>phyai_discovery</exec_depend>

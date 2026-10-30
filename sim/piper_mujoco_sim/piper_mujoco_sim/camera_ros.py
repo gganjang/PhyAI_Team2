@@ -1,4 +1,5 @@
 """MuJoCo rendered RGB-D and calibration in ROS optical-frame conventions."""
+from array import array
 import math
 
 import numpy as np
@@ -27,7 +28,10 @@ def image_msg(pixels, encoding, frame, stamp):
     msg.encoding = encoding
     msg.is_bigendian = False
     msg.step = msg.width * pixels.dtype.itemsize * (3 if encoding == 'rgb8' else 1)
-    msg.data = pixels.tobytes()
+    # ROS accepts a typed byte array directly. Assigning bytes instead runs
+    # Python validation over every pixel byte (hundreds of ms at sensor size),
+    # ageing the acquisition before it can reach the observer.
+    msg.data = array('B', pixels.tobytes())
     return msg
 
 

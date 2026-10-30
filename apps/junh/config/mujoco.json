@@ -1,17 +1,15 @@
 {
   "map_frame": "world",
   "viewpoints": [
-    "survey_1",
-    "survey_2",
-    "survey_3",
-    "survey_4",
-    "survey_5",
-    "survey_6",
-    "survey_7",
-    "survey_8",
-    "survey_9",
-    "survey_10",
-    "survey_11"
+    "sweep_1",
+    "sweep_2",
+    "sweep_3",
+    "sweep_4",
+    "sweep_5",
+    "sweep_6",
+    "sweep_7",
+    "sweep_8",
+    "sweep_9"
   ],
   "scope": [
     -0.8405,
@@ -23,267 +21,306 @@
   "capture_timeout": 30.0,
   "max_retries": 2,
   "input_max_age": 1.0,
-  "stationary_seconds": 0.5,
+  "stationary_seconds": 0.25,
   "stationary_tolerance": 0.003,
   "feedback_timeout": 1.0,
   "detector": {
-    "table_height_range": [
-      -0.005,
-      0.005
-    ],
-    "exclusion_boxes": [
-      [
-        -10,
-        -10,
-        -10,
-        -0.83,
-        10,
-        10
-      ],
-      [
-        0.83,
-        -10,
-        -10,
-        10,
-        10,
-        10
-      ],
-      [
-        -10,
-        -10,
-        -10,
-        10,
-        -0.53,
-        10
-      ],
-      [
-        -10,
-        0.53,
-        -10,
-        10,
-        10,
-        10
-      ],
-      [
-        -10,
-        -10,
-        -10,
-        10,
-        10,
-        -0.05
-      ]
-    ],
+    "backend": "rgb",
     "known_block_size": [
       0.075,
       0.025,
       0.015
+    ],
+    "planar": true,
+    "pixel_error": 1.0,
+    "calibration_error": 0.0005,
+    "overhead_proposals_only": true,
+    "proposal_only_viewpoints": [
+      "sweep_1",
+      "sweep_2",
+      "sweep_3",
+      "sweep_4",
+      "sweep_5",
+      "sweep_6",
+      "sweep_7",
+      "sweep_8",
+      "sweep_9"
     ]
   },
   "cameras": {
     "overhead": {
-      "depth_topic": "/overhead/depth/image_rect_raw",
-      "info_topic": "/overhead/depth/camera_info",
-      "depth_scale": 0.001,
+      "info_topic": "/overhead/discovery/camera_info",
       "roi": null,
       "mask": null,
-      "rgb_topic": "/overhead/color/image_rect_raw",
+      "rgb_topic": "/overhead/discovery/image_rect_raw",
       "calibration_revision": "installation_v1",
       "rectified": true,
-      "mask_topic": "/overhead/robot_mask"
+      "mask_topic": "/overhead/discovery/robot_mask",
+      "stream_rgb_topic": "/overhead/color/image_rect_raw"
     },
     "wrist": {
-      "depth_topic": "/wrist/depth/image_rect_raw",
-      "info_topic": "/wrist/depth/camera_info",
-      "depth_scale": 0.001,
+      "info_topic": "/wrist/discovery/camera_info",
       "roi": null,
       "mask": null,
-      "rgb_topic": "/wrist/color/image_rect_raw",
+      "rgb_topic": "/wrist/discovery/image_rect_raw",
       "calibration_revision": "installation_v1",
       "rectified": true,
-      "mask_topic": "/wrist/robot_mask"
+      "mask_topic": "/wrist/discovery/robot_mask",
+      "stream_rgb_topic": "/wrist/color/image_rect_raw"
     }
   },
   "sim_scan": {
-    "targeted_inspection": true,
-    "max_targeted_views_per_block": 2,
     "approach_seconds": 2.0,
     "move_seconds": 0.8,
-    "settle_seconds": 0.25,
+    "settle_seconds": 0.15,
     "targets": {
-      "survey_1": [
-        -2.4862275,
-        0.4145129,
-        -1.0164504,
-        -0.3278159,
-        1.1528077,
+      "sweep_1": [
+        -2.618,
+        0.21217682985054798,
+        -0.8279758903494534,
+        -0.09381223082182377,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_2": [
-        -2.1083601,
-        0.1327922,
-        -1.154291,
-        -0.2724289,
-        1.2144324,
+      "sweep_2": [
+        -2.618,
+        0.34042515245253885,
+        -0.6306764316935581,
+        -0.3410296846457332,
+        1.1795195729843284,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_3": [
-        -1.7005347,
-        0.1169518,
-        -0.9428013,
-        0.0958843,
-        1.156628,
+      "sweep_3": [
+        -1.8158812772130193,
         0.0,
-        0.0
-      ],
-      "survey_4": [
-        -1.3941034,
-        0.5572529,
-        -1.1674489,
-        -0.1410696,
-        1.1913115,
+        -0.7296253176510468,
+        0.1225396953923316,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_5": [
-        -0.10862,
-        0.2620865,
-        -1.0166608,
-        -0.2402526,
-        1.1861495,
+      "sweep_4": [
+        -0.9604792057951896,
+        0.32716427536993264,
+        -0.7925951506637942,
+        0.05490235962251802,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_6": [
-        0.0346979,
-        0.5336564,
-        -1.1811392,
-        0.3444136,
-        1.1561965,
+      "sweep_5": [
+        -0.14713939635621276,
         0.0,
-        0.0
-      ],
-      "survey_7": [
-        0.4025186,
-        0.1605458,
-        -0.9723539,
-        0.3692151,
-        1.2068792,
+        -0.8473542570260488,
+        -0.07996645134630645,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_8": [
-        0.5983196,
-        0.5489779,
-        -1.0909778,
-        -0.1328112,
-        1.109078,
+      "sweep_6": [
+        -0.11056856092544276,
+        0.2172984883171883,
+        -0.5054381410241678,
+        0.14247407184480188,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_9": [
-        0.9599798,
-        0.2209812,
-        -1.0875799,
-        -0.3688187,
-        1.189315,
+      "sweep_7": [
+        0.9016061894738538,
+        0.02226074024131107,
+        -0.7795506173646789,
+        0.0757219697705631,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_10": [
-        2.1771623,
-        0.443752,
-        -0.8308526,
-        -0.1002688,
-        1.1817756,
+      "sweep_8": [
+        0.996385800181887,
+        0.2933486954322001,
+        -0.5150536070687428,
+        0.23065597344933644,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "survey_11": [
-        2.2126027,
-        0.0398203,
-        -0.746659,
-        0.2553185,
-        1.2193708,
+      "sweep_9": [
+        2.450497461011754,
+        0.3784407548041905,
+        -0.5625670772897774,
+        -0.07345856242598825,
+        1.22,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_1": [
+      "refine_1": [
         0.6380013,
         0.00868,
         -0.6803376,
         0.3911083,
         1.2152995,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_2": [
+      "refine_2": [
         0.624767,
         0.0162484,
         -0.593319,
         0.0051703,
         1.14184,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_3": [
+      "refine_3": [
         0.4408451,
         0.0899337,
         -0.8865164,
         0.1249542,
         1.0084681,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_4": [
+      "refine_4": [
         0.3359732,
         0.5149454,
         -1.2291114,
         -0.3905941,
         1.1507112,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_5": [
+      "refine_5": [
         -0.9786876,
         0.2362566,
         -0.6795636,
         0.071857,
         1.1364641,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_6": [
+      "refine_6": [
         -1.2600035,
         0.5515988,
         -1.0314894,
         -0.380957,
         1.0952842,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_7": [
+      "refine_7": [
         -2.2843667,
         0.0397573,
         -0.6116794,
         0.1098679,
         1.2101951,
         0.0,
-        0.0
+        0.035
       ],
-      "inspection_8": [
+      "refine_8": [
         -2.4864082,
         0.2605321,
         -0.5970573,
         -0.4080084,
         1.1894908,
         0.0,
-        0.0
+        0.035
+      ],
+      "refine_9": [
+        0.6380013,
+        0.00868,
+        -0.6803376,
+        0.3911083,
+        1.2152995,
+        0.0,
+        0.035
+      ],
+      "refine_10": [
+        0.624767,
+        0.0162484,
+        -0.593319,
+        0.0051703,
+        1.14184,
+        0.0,
+        0.035
+      ],
+      "refine_11": [
+        0.4408451,
+        0.0899337,
+        -0.8865164,
+        0.1249542,
+        1.0084681,
+        0.0,
+        0.035
+      ],
+      "refine_12": [
+        0.3359732,
+        0.5149454,
+        -1.2291114,
+        -0.3905941,
+        1.1507112,
+        0.0,
+        0.035
+      ],
+      "refine_13": [
+        -0.9786876,
+        0.2362566,
+        -0.6795636,
+        0.071857,
+        1.1364641,
+        0.0,
+        0.035
+      ],
+      "refine_14": [
+        -1.2600035,
+        0.5515988,
+        -1.0314894,
+        -0.380957,
+        1.0952842,
+        0.0,
+        0.035
+      ],
+      "refine_15": [
+        -2.2843667,
+        0.0397573,
+        -0.6116794,
+        0.1098679,
+        1.2101951,
+        0.0,
+        0.035
+      ],
+      "refine_16": [
+        -2.4864082,
+        0.2605321,
+        -0.5970573,
+        -0.4080084,
+        1.1894908,
+        0.0,
+        0.035
+      ],
+      "refine_17": [
+        0.6380013,
+        0.00868,
+        -0.6803376,
+        0.3911083,
+        1.2152995,
+        0.0,
+        0.035
+      ],
+      "refine_18": [
+        0.624767,
+        0.0162484,
+        -0.593319,
+        0.0051703,
+        1.14184,
+        0.0,
+        0.035
       ]
     },
     "max_joint_speed": 1.2,
-    "max_joint_acceleration": 3.0
+    "max_joint_acceleration": 3.0,
+    "gripper_position": 0.035
   },
   "sim_camera_request_topic": "sim/camera_request",
   "segmentation": {
@@ -294,14 +331,38 @@
   },
   "inspection_rounds": [
     [
-      "inspection_1",
-      "inspection_2",
-      "inspection_3",
-      "inspection_4",
-      "inspection_5",
-      "inspection_6",
-      "inspection_7",
-      "inspection_8"
+      "refine_1",
+      "refine_2",
+      "refine_3",
+      "refine_4",
+      "refine_5",
+      "refine_6",
+      "refine_7",
+      "refine_8",
+      "refine_9",
+      "refine_10",
+      "refine_11",
+      "refine_12",
+      "refine_13",
+      "refine_14",
+      "refine_15",
+      "refine_16",
+      "refine_17",
+      "refine_18",
+      "refine_19",
+      "refine_20",
+      "refine_21",
+      "refine_22",
+      "refine_23",
+      "refine_24",
+      "refine_25",
+      "refine_26",
+      "refine_27",
+      "refine_28",
+      "refine_29",
+      "refine_30",
+      "refine_31",
+      "refine_32"
     ]
   ],
   "search_criteria": {
@@ -310,6 +371,17 @@
     "max_position_uncertainty": 0.01,
     "max_yaw_uncertainty": 0.08726646259971647,
     "min_coverage_gain": 0.005,
-    "max_no_progress_rounds": 1
+    "max_no_progress_rounds": 2,
+    "min_wrist_views": 2
+  },
+  "use_overhead": true,
+  "import_stacking_zone": false,
+  "overhead_capture_timeout": 5.0,
+  "overhead_max_retries": 0,
+  "continuous_camera_stream": true,
+  "image_reliability": "reliable",
+  "candidate_focus": {
+    "enabled": true,
+    "max_views_per_candidate": 4
   }
 }

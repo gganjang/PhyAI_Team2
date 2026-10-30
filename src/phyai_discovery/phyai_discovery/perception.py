@@ -329,6 +329,8 @@ class Detector:
         self.segmenter = segmenter
 
     def detect(self, capture: Capture):
+        if capture.depth is None:
+            raise ValueError('Depth detector requires measured depth; configure an RGB-only backend for RGB captures.')
         c = self.config
         points, pixels = backproject(capture, c)
         if len(points) < c.min_plane_points:

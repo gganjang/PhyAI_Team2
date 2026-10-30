@@ -1,3 +1,142 @@
+# Teammate quick-start: RGB discovery and viewer
+
+Build the shared packages; Junh, MuJoCo and the retired stacking/monitoring apps
+are not required:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-up-to phyai_discovery_ros
+source install/setup.bash
+cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json" /tmp/team-discovery.json
+# Edit the copied installation settings described below before launching.
+# Run from the repository root to provision/load SAM2 automatically:
+bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
+  with_viewer:=true viewer_port:=23518 auto_scan:=false
+```
+
+Open **http://localhost:23518**. The map, candidate count, uncertainty and final
+inventory work on hardware without a simulator. If needed, forward this loopback
+HTTP port over SSH or through your IDE. Set `simulator_port:=23517` only when a
+compatible simulator is running; its live video appears beside the map. Hardware
+geometry can also be viewed in RViz through `discovery/workspace_markers`; the
+browser does not synthesize a hardware robot rendering. In RViz, set Fixed Frame
+to your configured `map_frame` and add a MarkerArray display for that topic.
+
+The RGB template uses color CameraInfo and never subscribes to depth. Its numbers
+are examples, not installation calibration. Supply these before use:
+
+- A measured table frame with tabletop **Z=0**, and the table's XY `scope` in metres.
+  The RGB backend assumes flat blocks on that installation plane.
+- Measured block dimensions and appropriate pixel/calibration error bounds.
+- RGB/CameraInfo topics (or measured JSON intrinsics), acquisition-time camera-to-table
+  TF, calibrated wrist extrinsics, synchronized clocks and fresh joint feedback.
+- Robot/fixture exclusions when needed: static boolean masks or acquisition-matched
+  `mono8` mask topics. This adapter does not generate a hardware robot mask.
+
+The shared ROS adapter checks PIPER `joint1` through `joint7` for stationarity.
+For another robot/feedback schema, adapt those messages or use the Python core
+with your own stationarity verification. No robot commands are sent with
+`auto_scan:=false`. Shared discovery owns the **survey → focus → confirm** policy;
+your robot adapter owns feasible camera poses, IK/collision checks, movement and
+arrival verification. Read `/discovery/search_progress` and its `view_request`:
+
+- `session_id` and `request_id` identify this exact request; repeated reads return
+  the same ID until the request is completed or replaced.
+- `phase: survey` has `focus: null`; execute the configured survey pose named by
+  `viewpoint`.
+- `phase: candidate_inspection` includes the selected candidate ID, measured
+  position, size and supporting views in `focus`. Plan a clear, novel observation
+  of that target. `frame` gives its coordinate frame and `criteria` gives the
+  requested measurement bounds.
+
+After verifying arrival, echo the IDs from that request:
+
+```bash
+ros2 service call /discovery/report_view phyai_discovery_interfaces/srv/ReportView \
+  "{session_id: 'SESSION_FROM_REQUEST', request_id: 'REQUEST_ID', outcome: 'arrived', reason: ''}"
+```
+
+Discovery then waits for stationary feedback and captures its RGB observation.
+If the adapter cannot find a feasible view, report `outcome: 'unreachable'` and a
+reason. Discovery retains that candidate's uncertainty and selects another
+candidate, potentially reusing the same `viewpoint` slot with a **new request ID**.
+Old-session, superseded, or late no-plan reports cannot alter an active capture.
+The legacy `/discovery/capture` Trigger remains available for manual/fixed scans.
+
+Overhead is acquired automatically once. Wrist arrivals must be reported after each move. Subscribe to `/discovery/workspace` (`std_msgs/String`, JSON
+`workspace` + `search`) for live inventory. After `search.state=search_finished`:
+
+```bash
+ros2 service call /discovery/get_block_info phyai_discovery_interfaces/srv/GetBlockInfo '{}'
+```
+
+Use `search.result`, unresolved hypotheses and pose bounds. Scan termination is
+not a complete-scene or grasp-readiness guarantee. Reset with
+`/discovery/restart_scan` when the scene/calibration changes. The app may add
+inspection views through `/discovery/add_view`; its robot adapter plans the
+physical camera pose requested by discovery. The generic shared scan controller executes configured fixed poses with
+`auto_scan:=true`. For candidate-directed motion, subclass
+`phyai_discovery_ros.scan.ScanNode` and implement `plan_view(request, current)` to
+return feasible joints or `None`. The shared controller handles caching,
+trajectory/arrival feedback and `ReportView`; it never selects another candidate
+or owns the per-candidate view budget. A candidate request without a robot planner
+stops with an explicit fault instead of moving to an arbitrary fallback pose.
+Junh's `SimScanNode` is the MuJoCo implementation of this adapter hook.
+
+## Attach the viewer to an already-running discovery
+
+This command starts only the read-only viewer, not another discovery or scanner:
+
+```bash
+ros2 run phyai_discovery_ros viewer --ros-args -p http_port:=23518
+```
+
+Use the same `ROS_DOMAIN_ID` as your producer. Default names are
+`discovery/workspace`, `discovery/get_block_info`, and
+`discovery/workspace_markers`. For another app's envelope:
+
+```bash
+ros2 run phyai_discovery_ros viewer --ros-args \
+  -p http_port:=23518 \
+  -p workspace_topic:=/my_app/discovery \
+  -p block_info_service:=/my_app/get_block_info \
+  -p markers_topic:=/my_app/workspace_markers
+```
+
+If your app publishes core snapshots but does not implement `GetBlockInfo`, add
+`-p query_block_info:=false`; the viewer uses the finished snapshot's inventory
+directly. No query service is needed in that mode.
+
+For the existing Junh producer, use `workspace_topic:=/junh/discovery` and
+`block_info_service:=/junh/get_block_info`. The old Junh viewer command remains a
+compatibility entry point. A ROS namespace applies to all relative viewer names;
+the combined launch's `namespace:=team_a` places discovery and viewer together
+under `/team_a/discovery/...`. Browser HTTP ports must differ between viewers.
+
+## Embed directly in Python
+
+`phyai_discovery` is independent of ROS and MuJoCo. Use `Discovery` with
+`detector.backend: rgb`, a SAM2 configuration and calibrated `Capture` objects
+with `depth=None`. Your camera adapter and arm controller own acquisition, TF and
+stationarity. See the [core example](../phyai_discovery/README.md#rgb-only-python-integration).
+The same HTML viewer is available as `phyai_discovery.viewer.WorkspaceWeb`; update
+it with `feature.snapshot()` after each observation. No ROS services are needed.
+
+---
+
+The remaining sections document the generic transport, including the retained
+legacy RGB-D backend. For the RGB-only workflow, use `discovery_rgb.json` above;
+`discovery.json` remains the legacy depth template for compatibility.
+
+## RGB-only wrist discovery
+
+Junh's `apps/junh/run_sim.sh` uses `detector.backend: rgb`, SAM2 proposals and
+color CameraInfo. In this mode the shared adapter subscribes directly to RGB and
+creates `Capture.depth=None`; no depth topic or depth CameraInfo is required.
+Set `use_overhead: false` to start with the wrist sweep. `search_criteria.min_wrist_views`
+can require wrist support independently of overhead observations. The generic
+configuration below retains depth support for other applications.
+
 # Shared discovery ROS adapter
 
 Use `phyai_discovery_ros` from any ROS 2 Humble app to turn calibrated RGB-D
@@ -41,8 +180,8 @@ The launcher automatically creates/reuses `.discovery-sam2/`, installs pinned
 PyTorch/torchvision/SAM2 dependencies, downloads SAM2.1 tiny weights when missing,
 loads the real checkpoint to validate it, and writes a configuration with
 `segmentation.backend: sam2` and the correct absolute checkpoint path. It sources
-the Python dependency environment and launches discovery. Aligned RGB/depth is
-required. First use needs network access and several GB of disk space; later
+the Python dependency environment and launches discovery. The RGB backend requires
+calibrated RGB only; the depth backend requires aligned RGB/depth when SAM2 is used. First use needs network access and several GB of disk space; later
 launches reuse the dependencies and checkpoint. Setup never silently falls back
 to depth-only segmentation.
 
@@ -375,3 +514,54 @@ is available. Then run transport tests from the repository root:
 PYTHONPATH=src/phyai_discovery:src/phyai_discovery_ros \
   python3 -m pytest -q src/phyai_discovery_ros/test
 ```
+
+### Stack ordering in the final inventory
+
+Set `stacking_zone_position: [x, y]` in the installation JSON using metres in
+`map_frame`; the supplied hardware template leaves it null until measured.
+After completion, `GetBlockInfo` and workspace publications use `block_basement`
+for the closest confirmed block, then `block_1` through `block_(N-1)`, ordered by
+XY center distance to the target. Query `{block_id: "block_basement"}` for the
+first block. `track_id` retains the original association identity, and
+`stack_index`/`distance_to_stacking_zone` expose the order and distance.
+
+The simulator supplies live target metadata from the viewer in `world`; the
+adapter requires it to match `map_frame`. Target changes increment the workspace
+revision and recalculate the order, so consumers must invalidate older plans.
+The same order is shown in Junh's final block list and map labels. During search,
+IDs remain association IDs; missing target coordinates leave stack naming unassigned.
+
+## Shared candidate-focus configuration and adapter contract
+
+The RGB template enables `candidate_focus.enabled: true`. Configure
+`candidate_focus.max_views_per_candidate` (default 3) for a bounded session.
+`viewpoints` names the brief survey; `inspection_rounds` supplies bounded names for
+focused observations. Those names are request slots, not candidate IDs. Dynamic
+inspection slots do not need fixed joint targets; only survey poses are required
+in a robot scan configuration. The same core selects candidates whether the app
+uses ROS, MuJoCo or direct Python.
+
+Discovery stays on the selected candidate until it meets the observation criteria
+or exhausts its budget. Stable hypothesis identities keep its budget intact when
+it gains a public block ID. Each acquired focused view consumes one attempt for its selected candidate;
+retries at the same view do not manufacture independent evidence. Reset starts a
+new policy session. Unreachable/exhausted candidates remain in the partial
+inventory. `candidate_focus` status in snapshots exposes counts and reasons.
+
+For Python applications, call `feature.view_request()` and pass that request to
+your robot adapter. Report results with:
+
+```python
+request = feature.view_request()
+# After the robot adapter verifies physical arrival:
+feature.report_view(request["request_id"], "arrived",
+                    session_id=request["session_id"], now=monotonic_now)
+# Or, when it cannot plan a feasible view:
+feature.report_view(request["request_id"], "unreachable",
+                    session_id=request["session_id"], reason="No collision-free view")
+```
+
+Use one outcome for a request. Drive `tick()` with measured stationarity and feed
+calibrated captures as before; `complete()` advances the shared policy. Read
+`view_request()` again after each observation or no-plan report. A false return
+means the report no longer applies. Snapshot reads do not select or consume views.

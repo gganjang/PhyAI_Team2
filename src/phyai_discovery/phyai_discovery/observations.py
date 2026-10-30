@@ -1,4 +1,4 @@
-"""Validated RGB-D capture contracts; no scene-file or robot-command dependency."""
+"""Validated RGB/RGB-D captures; no scene-file or robot-command dependency."""
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -30,7 +30,7 @@ class Capture:
     map_frame: str
     calibration_revision: str
     intrinsics: Intrinsics
-    depth: np.ndarray  # optical-axis distance, metres
+    depth: Optional[np.ndarray]  # optical-axis metres; None for an RGB-only backend
     camera_to_map: np.ndarray
     viewpoint: str = 'overhead'
     rgb: Optional[np.ndarray] = None
@@ -47,7 +47,9 @@ class Capture:
         if not np.isfinite(self.stamp) or self.stamp <= 0:
             raise ValueError('Capture requires a positive acquisition timestamp.')
         shape = (self.intrinsics.height, self.intrinsics.width)
-        if self.depth.shape != shape or self.depth.dtype.kind != 'f':
+        if self.depth is None and self.rgb is None:
+            raise ValueError('Capture requires RGB or measured depth.')
+        if self.depth is not None and (self.depth.shape != shape or self.depth.dtype.kind != 'f'):
             raise ValueError('Depth must be a matching floating-point image in metres.')
         if self.rgb is not None and (self.rgb.shape != (*shape, 3) or self.rgb.dtype != np.uint8):
             raise ValueError('RGB must be matching uint8 RGB pixels.')
@@ -87,13 +89,15 @@ def decode_depth(data, width, height, step, encoding, bigendian=False, scale=.00
 def load_capture(entry, base):
     """Read a manifest entry containing measured depth, intrinsics and extrinsics."""
     base = Path(base)
-    depth = np.load(base / entry['depth'], allow_pickle=False)
-    if entry.get('depth_unit') == 'mm':
-        depth = depth.astype(np.float32)*.001
-    elif entry.get('depth_unit') == 'm':
-        depth = depth.astype(np.float32)
-    else:
-        raise ValueError('Recorded depth_unit must explicitly be m or mm.')
+    depth = None
+    if entry.get('depth'):
+        depth = np.load(base / entry['depth'], allow_pickle=False)
+        if entry.get('depth_unit') == 'mm':
+            depth = depth.astype(np.float32)*.001
+        elif entry.get('depth_unit') == 'm':
+            depth = depth.astype(np.float32)
+        else:
+            raise ValueError('Recorded depth_unit must explicitly be m or mm.')
     capture = Capture(
         camera=entry['camera'], stamp=float(entry['stamp']),
         optical_frame=entry['optical_frame'], map_frame=entry['map_frame'],

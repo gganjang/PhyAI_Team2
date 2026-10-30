@@ -7,7 +7,7 @@ import numpy as np
 
 class SAM2Segmenter:
     def __init__(self, checkpoint, model_config='configs/sam2.1/sam2.1_hiera_t.yaml',
-                 device='cuda', min_score=.7):
+                 device='cuda', min_score=.7, points_per_side=32):
         try:
             import torch
             from sam2.build_sam import build_sam2
@@ -22,15 +22,33 @@ class SAM2Segmenter:
         if device == 'cuda' and not torch.cuda.is_available():
             raise ValueError('SAM 2 CUDA requested but unavailable; configure device=cpu explicitly.')
         self.torch = torch
-        self.predictor = SAM2ImagePredictor(build_sam2(model_config, str(checkpoint), device=device))
+        self.model = build_sam2(model_config, str(checkpoint), device=device)
+        self.predictor = SAM2ImagePredictor(self.model)
         self.min_score = min_score
+        self.points_per_side = points_per_side
+        self.generator = None
+
+    def propose(self, rgb):
+        """Unprompted instance masks from a point grid; no colour or count prior.
+
+        Masks cover every segmentable region (table tiles, robot, blocks);
+        callers decide which regions are blocks from calibrated geometry.
+        """
+        if self.generator is None:
+            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+            self.generator = SAM2AutomaticMaskGenerator(
+                self.model, points_per_side=self.points_per_side,
+                pred_iou_thresh=self.min_score, stability_score_thresh=.9)
+        with self.torch.inference_mode():
+            regions = self.generator.generate(np.array(rgb, copy=True, order='C'))
+        return [region['segmentation'].astype(bool) for region in regions]
 
     def segment(self, capture, pixels, groups):
         if capture.rgb is None:
             raise ValueError('SAM 2 requires capture-matched aligned RGB.')
         masks = []
         with self.torch.inference_mode():
-            self.predictor.set_image(capture.rgb)
+            self.predictor.set_image(np.array(capture.rgb, copy=True, order='C'))
             for group in groups:
                 uv = pixels[group]
                 lo, hi = uv.min(axis=0), uv.max(axis=0)
@@ -72,4 +90,5 @@ def make_segmenter(config):
         raise ValueError('SAM2 checkpoint is not configured. Run scripts/setup_discovery_sam2.sh and source its env.sh.')
     return SAM2Segmenter(checkpoint,
         config.get('model_config','configs/sam2.1/sam2.1_hiera_t.yaml'),
-        config.get('device','cuda'), config.get('min_score',.7))
+        config.get('device','cuda'), config.get('min_score',.7),
+        config.get('points_per_side',32))

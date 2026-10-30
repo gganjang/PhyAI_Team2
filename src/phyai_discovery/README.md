@@ -1,3 +1,62 @@
+# Active discovery workflow
+
+The Junh scatter-and-discover launch now uses RGB-only SAM2 proposals, a calibrated
+wrist sweep and optional supporting overhead observation. Block color is not an
+identity or proposal rule. No camera depth enters that workflow. See
+[Junh discovery](../../apps/junh/README.md) for its launch and limits.
+The depth backend described below remains available for separate consumers.
+
+## RGB-only Python integration
+
+Install `phyai_discovery` and provision SAM2 using
+`scripts/setup_discovery_sam2.sh --config /path/to/your/installation.json`, then
+source `.discovery-sam2/env.sh`. The viewer itself uses only Python's standard
+library; importing the core needs NumPy and does not load SAM2 or ROS.
+
+```python
+from phyai_discovery import Discovery, Capture, Intrinsics, SearchState
+from phyai_discovery.viewer import WorkspaceWeb
+
+feature = Discovery({
+    "map_frame": "table",          # measured tabletop is Z=0
+    "scope": [-0.8, 0.8, -0.5, 0.5],  # replace with your measured table
+    "use_overhead": False,
+    "viewpoints": ["left", "right"],
+    "detector": {"backend": "rgb", "known_block_size": [0.075, 0.025, 0.015]},
+    "segmentation": {"backend": "sam2"},  # checkpoint comes from sourced env
+    "search_criteria": {"min_wrist_views": 2},
+    "candidate_focus": {"enabled": True, "max_views_per_candidate": 3},
+    "inspection_rounds": [["focus_1", "focus_2", "focus_3", "focus_4", "focus_5", "focus_6"]],
+})
+viewer = WorkspaceWeb(23518)       # http://localhost:23518; no ROS required
+viewer.update(feature.snapshot())
+
+# In your existing acquisition loop, after moving to feature.search.target:
+# request = feature.view_request()
+# robot_adapter plans and executes this request (focus=None for survey).
+# feature.report_view(request["request_id"], "arrived",
+#     session_id=request["session_id"], now=monotonic_now)
+# feature.tick(monotonic_now, stationary=True)  # verified from actual feedback
+# capture = Capture(camera="wrist", stamp=acquisition_stamp,
+#     optical_frame="wrist_optical", map_frame="table", calibration_revision="v1",
+#     intrinsics=measured_intrinsics, depth=None,
+#     camera_to_map=acquisition_transform, viewpoint=feature.search.target,
+#     rgb=rgb_pixels, mask=robot_exclusion)
+# feature.process(capture, stationary=True)
+# viewer.update(feature.snapshot())
+# When the app shuts down: viewer.close()
+```
+
+Keep the hosting app alive while using the viewer. A finished snapshot supplies
+its final block table directly, without a ROS query service. To embed only the
+map for an existing discovery feature, instantiate `WorkspaceWeb` and call
+`update()`; do not construct another `Discovery`. Shared candidate-focus scanning is configured with
+`candidate_focus: {"enabled": true, "max_views_per_candidate": 3}`. The core
+selects the next candidate and issues a stable `feature.view_request()`; the
+robot adapter reports `arrived` or `unreachable` through `feature.report_view()`.
+The ROS adapter and viewer have
+a [shared quick-start](../phyai_discovery_ros/README.md#teammate-quick-start-rgb-discovery-and-viewer).
+
 # Shared discovery feature
 
 `phyai_discovery` is the reusable discovery stage for the team's integrated app.
@@ -9,7 +68,7 @@ camera / recording adapter -> Capture -> Discovery -> workspace + search result
                                             |
                             optional SAM2 -> measured depth geometry
 
-integrated app: discovery -> planning -> safeguard -> execution
+integrated app: discovery -> planning -> safecheck -> execution
 junh test app:  discovery + ROS transport + MuJoCo scan driver + workspace viewer
 ```
 
@@ -87,6 +146,14 @@ The adapter must verify synchronization, freshness, and stationarity before
 passing `stationary=True`. Use `Stationarity` for the current seven-joint arm's
 feedback, or supply equivalent verification for your hardware.
 
+For RGB-only inputs, set `Capture.depth=None`, supply RGB pixels and pass an
+explicit `phyai_discovery.rgb.RGBDetector` to `Discovery(detector=...)`. This
+experimental backend uses calibrated known-size silhouette fits. The same shared
+search, cross-view identity association and final naming/order lifecycle applies.
+RGB observations do not populate measured table geometry or surface coverage.
+A finished RGB inventory can be partial and is never marked grasp-ready. The ROS adapter also supports direct RGB acquisition when `detector.backend` is
+`rgb`; Junh's discovery-only launch uses this mode.
+
 ```python
 from phyai_discovery import Discovery, SearchState
 
@@ -148,7 +215,7 @@ adapters. Existing `/junh/discovery` consumers continue to receive their envelop
 | `search.result.pick_ready` | Always false; discovery does not validate a grasp |
 
 A finished sequence may produce partial results. Planning must inspect uncertainty
-and scan outcome; discovery alone does not authorize picking or bypass safeguard.
+and scan outcome; discovery alone does not authorize picking or bypass safecheck.
 The existing `junh_master.handoff.Master` remains a prototype consumer in the test app.
 
 For inter-app retrieval after a ROS scan, use
@@ -207,3 +274,29 @@ multiple camera positions, stable identities, and checks against ground truth.
 Source ROS and a built workspace to include ROS adapter tests. Actual SAM2 tests
 additionally require the local SAM2 environment and checkpoint, as documented in
 [`apps/junh/README.md`](../../apps/junh/README.md).
+
+### Stacking order names
+
+Configure `stacking_zone_position: [x, y]` in metres in `map_frame`. When search
+finishes, the public inventory is sorted by planar center-to-center distance
+from the zone. The nearest confirmed block is `block_basement`; the remaining
+blocks are `block_1` through `block_(N-1)`. These names appear in public `id` and
+`name`, with `stack_index` (zero for the basement), `distance_to_stacking_zone`
+in metres, and the original association identity in `track_id`. Exact distance
+ties use X, then Y, then tracking ID. Z does not affect the order.
+
+Association IDs remain unchanged inside discovery. Final task names are assigned
+only after search finishes and are scoped to the scan session and revision.
+Restarting or adding inspection views requires using the next finished inventory.
+Changing the target increments the revision and recalculates final names; discard
+previous task plans when the target/session/revision changes. The workspace
+`stacking_order` records the target, frame, assignment status and ordered IDs.
+Without configured target coordinates, names remain association IDs and
+`stacking_order.assigned` is false. Provisional hypotheses never receive stack
+names; pose uncertainty and `pick_ready: false` remain part of the handoff.
+
+In simulation, the ROS adapter obtains only the target coordinates and frame
+from `/sim/scene`; block count, IDs and poses still come from measured images.
+For hardware, set the measured target coordinates in discovery's map frame in
+the installation configuration. Offline recording manifests may also contain
+`stacking_zone_position` in the manifest's map frame.

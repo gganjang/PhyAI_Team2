@@ -1,4 +1,4 @@
-"""ROS adapter and actual publish/subscribe handoff tests."""
+"""Discovery ROS adapter and workspace viewer integration tests."""
 import json
 import time
 from pathlib import Path
@@ -16,9 +16,7 @@ from std_srvs.srv import Trigger
 from visualization_msgs.msg import MarkerArray
 
 from phyai_discovery_ros import node as discovery_module
-from junh_master.handoff import Master, Placement
 from junh_master.ros.discovery_node import DiscoveryNode
-from junh_master.ros.handoff_node import MasterNode
 from junh_master.ros.viewer_node import ViewerNode
 from phyai_discovery.perception import Detector, DetectorConfig
 from phyai_discovery.search import Search, SearchState
@@ -52,26 +50,6 @@ def config_file(tmp_path):
     path=tmp_path/'config.json'
     path.write_text(json.dumps(cfg))
     return path
-
-
-def test_master_partial_handoff_and_malformed_input(ros):
-    node=MasterNode();ros.append(node)
-    data=envelope()
-    node.on_discovery(String(data=json.dumps(data)))
-    assert node.master.state=='waiting_for_model'
-    assert node.master.observation.search_status=='partial'
-    assert node.master.status()['pick_ready'] is False
-    node.on_discovery(String(data='invalid'))
-    assert node.master.observation is None
-    assert node.received is None
-
-
-def test_master_stale_publisher_clears_current_handoff(ros):
-    node=MasterNode();ros.append(node)
-    node.on_discovery(String(data=json.dumps(envelope())))
-    node.received=time.monotonic()-10
-    node.tick()
-    assert node.master.state=='waiting_for_discovery'
 
 
 def test_live_callbacks_require_calibration_stationarity_and_capture_tf(ros,tmp_path,monkeypatch):
@@ -120,7 +98,7 @@ def test_live_callbacks_require_calibration_stationarity_and_capture_tf(ros,tmp_
     assert node.stationarity.latest is None
 
 
-def test_recorded_nodes_publish_to_master_and_viewer(ros,tmp_path):
+def test_recorded_discovery_publishes_to_viewer(ros,tmp_path):
     captures=[image_capture([(-.1,0.,.075,.025,.015,0.)]),
               image_capture([(.6,0.,.075,.025,.015,.3)],'wrist',2.,'right',.6)]
     entries=[]
@@ -134,23 +112,22 @@ def test_recorded_nodes_publish_to_master_and_viewer(ros,tmp_path):
     manifest.write_text(json.dumps({'version':1,'map_frame':'base_link','viewpoints':['right'],'captures':entries}))
     discovery=DiscoveryNode(parameter_overrides=[Parameter('config_path',value=str(config_file(tmp_path))),
                                                 Parameter('recording_path',value=str(manifest))])
-    master=MasterNode();viewer=ViewerNode();ros.extend([discovery,master,viewer])
+    viewer=ViewerNode();ros.extend([discovery,viewer])
     from junh_master.viewer.web import WorkspaceWeb
     viewer.web=WorkspaceWeb(0)
     markers=[]
-    master.create_subscription(MarkerArray,'junh/workspace_markers',lambda msg:markers.append(msg),1)
+    viewer.create_subscription(MarkerArray,'junh/workspace_markers',lambda msg:markers.append(msg),1)
     executor=SingleThreadedExecutor()
-    for node in (discovery,master,viewer): executor.add_node(node)
+    for node in (discovery,viewer): executor.add_node(node)
     deadline=time.monotonic()+5
     try:
         while time.monotonic()<deadline:
             executor.spin_once(timeout_sec=.05)
-            if master.master.state=='waiting_for_model' and viewer.latest is not None and viewer.latest['search']['result'] and viewer.latest['block_info']['status']=='ready' and markers:
+            if viewer.latest is not None and viewer.latest['search']['result'] and viewer.latest['block_info']['status']=='ready' and markers:
                 break
         assert discovery.search.state==SearchState.FINISHED
-        assert master.master.observation.search_status=='partial'
-        assert len(master.master.observation.tracks)==2
-        assert viewer.latest['workspace']['revision']==master.master.observation.revision
+        assert len(viewer.latest['workspace']['tracks'])==2
+        assert viewer.latest['workspace']['revision']==discovery.workspace.revision
         assert viewer.latest['search']['result']['pick_ready'] is False
         assert viewer.latest['block_info']['status']=='ready'
         assert len(viewer.latest['block_info']['blocks'])==2
@@ -191,7 +168,6 @@ def test_additional_views_are_bounded_and_restart_discards_worker(ros,tmp_path):
     while node.future is not None and time.monotonic()<deadline:
         node.tick();time.sleep(.01)
     assert node.workspace.revision==0
-
 
 
 def test_robot_mask_history_is_bounded_and_capture_matched(ros,tmp_path):
@@ -287,3 +263,52 @@ def test_viewer_rejects_block_info_from_another_scan(ros):
     node.query_block_info()
     assert node.latest['block_info']['status']=='error'
     assert 'blocks' not in node.latest['block_info']
+
+
+def test_viewer_is_discovery_only(ros):
+    node = ViewerNode()
+    ros.append(node)
+    node.on_workspace(String(data=json.dumps(envelope())))
+    assert 'task_monitor' not in node.latest
+    subscriptions = [name for name, _ in node.get_subscriber_names_and_types_by_node(
+        node.get_name(), node.get_namespace())]
+    assert '/task_monitor/state' not in subscriptions
+
+
+def test_rgb_ingestion_reports_30hz_without_queueing_detection_frames(ros, tmp_path, monkeypatch):
+    node = DiscoveryNode(parameter_overrides=[Parameter('config_path', value=str(config_file(tmp_path)))])
+    ros.append(node)
+    node.rgb_only = True
+    node.future = SimpleNamespace()  # An inference is still in flight.
+    clock = [100.]
+    monkeypatch.setattr(discovery_module, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    for index in range(61):
+        clock[0] = 100.+index/30.
+        msg = Image(width=16, height=12, encoding='rgb8', step=48, data=bytes([index])*576)
+        node.on_rgb('wrist', msg)
+    rates = node.camera_rates()['wrist']
+    assert rates['received_hz'] == pytest.approx(30.)
+    assert rates['received_frames'] == 61
+    assert rates['detected_frames'] == 0
+    assert rates['detection_hz'] == 0.
+    assert len(node.rgb) == 1
+    assert not node.rgb['wrist'][2].flags.writeable
+    assert node.rgb['wrist'][2][0,0,0] == 60
+    clock[0] += 3.
+    assert node.camera_rates()['wrist']['received_hz'] == 0.
+    node.future = None
+
+
+def test_stream_images_do_not_replace_a_selected_capture(ros, tmp_path):
+    node=DiscoveryNode(parameter_overrides=[Parameter('config_path',value=str(config_file(tmp_path)))])
+    ros.append(node)
+    node.config['cameras']['wrist']['stream_rgb_topic']='/wrist/color/image_rect_raw'
+    capture=Image(width=16,height=12,encoding='rgb8',step=48,data=bytes([200])*576)
+    node.on_rgb('wrist',capture)
+    stream=Image(width=8,height=6,encoding='rgb8',step=24,data=bytes([30])*144)
+    node.on_stream_rgb('wrist',stream)
+    assert node.rgb['wrist'][2].shape==(12,16,3)
+    assert node.rgb['wrist'][2][0,0,0]==200
+    assert node.stream_rgb['wrist'].shape==(6,8,3)
+    assert not node.stream_rgb['wrist'].flags.writeable
+    assert node.camera_rates()['wrist']['received_frames']==1

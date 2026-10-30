@@ -41,7 +41,8 @@ class Stationarity:
 
 
 class Search:
-    def __init__(self, workspace, viewpoints=('wrist_1', 'wrist_2'), max_retries=2, capture_timeout=15., criteria=None, inspection_rounds=()):
+    def __init__(self, workspace, viewpoints=('wrist_1', 'wrist_2'), max_retries=2, capture_timeout=15., criteria=None, inspection_rounds=(), use_overhead=True,
+                 overhead_capture_timeout=None, overhead_max_retries=None):
         if len(set(viewpoints)) != len(viewpoints) or any(not isinstance(v, str) or not v or v == 'overhead' for v in viewpoints):
             raise ValueError('Wrist viewpoints require unique nonempty labels.')
         if not viewpoints or max_retries < 0 or not math.isfinite(capture_timeout) or capture_timeout <= 0:
@@ -57,6 +58,14 @@ class Search:
             raise ValueError('Invalid inspection viewpoint label.')
         self.workspace, self.viewpoints = workspace, self.base_viewpoints
         self.max_retries, self.timeout = max_retries, capture_timeout
+        self.use_overhead = use_overhead
+        self.overhead_timeout = capture_timeout if overhead_capture_timeout is None else overhead_capture_timeout
+        self.overhead_max_retries = max_retries if overhead_max_retries is None else overhead_max_retries
+        if not math.isfinite(self.overhead_timeout) or self.overhead_timeout <= 0:
+            raise ValueError('Overhead capture timeout must be positive.')
+        if (not isinstance(self.overhead_max_retries, int) or isinstance(self.overhead_max_retries, bool)
+                or self.overhead_max_retries < 0):
+            raise ValueError('Overhead retry count must be a nonnegative integer.')
         self.reset()
 
     def reset(self):
@@ -65,11 +74,12 @@ class Search:
         self.no_progress_rounds = 0
         self.assessment = None
         self.previous_assessment = None
-        self.state = SearchState.OVERHEAD
+        self.state = SearchState.OVERHEAD if self.use_overhead else SearchState.WRIST
         self.index = 0
         self.accepted = self.rejected = 0
         self.attempts = 0
-        self.reason = 'Waiting for a fresh overhead capture.'
+        self.reason = ('Waiting for a fresh overhead capture.' if self.use_overhead
+                       else f'Position the wrist camera at {self.target}, then request capture.')
         self.pending_since = None
         self.generation = getattr(self, 'generation', 0)+1
         self.result = None
@@ -93,7 +103,10 @@ class Search:
         if self.state in (SearchState.OVERHEAD, SearchState.STATIONARY, SearchState.CAPTURE, SearchState.PROCESSING):
             if self.pending_since is None:
                 self.pending_since = now
-            if now-self.pending_since > self.timeout:
+            # Bound optional overhead acquisition separately; inference still
+            # gets the normal processing budget once a frame is accepted.
+            timeout = self.overhead_timeout if self.state == SearchState.OVERHEAD else self.timeout
+            if now-self.pending_since > timeout:
                 self.reject('Capture or processing timed out.')
 
     def accepts(self, capture, stationary=True):
@@ -138,7 +151,8 @@ class Search:
         self.generation += 1  # invalidate worker results after timeout/rejection
         self.pending_since = None
         self.reason = reason
-        if self.attempts > self.max_retries:
+        max_retries = self.overhead_max_retries if overhead else self.max_retries
+        if self.attempts > max_retries:
             self.attempts = 0
             if overhead:
                 self.state = SearchState.WRIST
@@ -193,12 +207,12 @@ class Search:
                     and not any(not track['resolved'] for track in snap['tracks'])
                     and not snap.get('hypotheses')
                     and not snap['warnings'])
-        self.result = {'status': 'failed' if not self.accepted or snap['table'] is None
+        self.result = {'status': 'failed' if not self.accepted or (snap['table'] is None and not snap['tracks'])
                        else 'complete' if complete else 'partial',
                        'snapshot_revision': snap['revision'], 'reason': reason,
                        'stop_reason':stop_reason,
                        'criteria_met': self.assessment['met'] if self.assessment is not None else None,
-                       'pick_ready': False}  # grasp geometry and safeguard remain unverified
+                       'pick_ready': False}  # grasp geometry and safecheck validation remain unverified
 
     def progress(self):
         return {'state': self.state.value, 'viewpoint_index': self.index,

@@ -175,7 +175,7 @@ def test_http_editor_and_stream(editor):
     try:
         with urlopen(url, timeout=3) as response:
             page = response.read()
-            assert b'Read-only viewer' in page
+            assert b'id="feed"' in page
             assert b'Save scene' not in page
         with urlopen(url + '/edit', timeout=3) as response:
             assert b'Save scene' in response.read()
@@ -245,7 +245,9 @@ def test_custom_model_stays_view_only():
     url = f'http://127.0.0.1:{server.server_port}'
     try:
         with urlopen(url, timeout=3) as response:
-            assert b'Read-only viewer' in response.read()
+            page = response.read()
+            assert b'id="feed"' in page
+            assert b'Save scene' not in page
         with urlopen(url + '/edit/scene', timeout=3) as response:
             assert not json.load(response)['enabled']
         request = Request(url + '/edit/scene/save', data=b'{}',

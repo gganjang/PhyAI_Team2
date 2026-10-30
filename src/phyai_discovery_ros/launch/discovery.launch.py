@@ -4,6 +4,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, EnvironmentVariable
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -16,6 +17,14 @@ def generate_launch_description():
         DeclareLaunchArgument('joint_states_topic', default_value='/joint_states'),
         DeclareLaunchArgument('command_topic', default_value='/joint_ctrl_single'),
         DeclareLaunchArgument('auto_scan', default_value='false'),
+        DeclareLaunchArgument('with_viewer', default_value='false'),
+        DeclareLaunchArgument('viewer_port', default_value='23518'),
+        DeclareLaunchArgument('simulator_port', default_value='0'),
+        Node(package='phyai_discovery_ros', executable='viewer', output='screen',
+             namespace=LaunchConfiguration('namespace'),
+             condition=IfCondition(LaunchConfiguration('with_viewer')),
+             parameters=[{'http_port': ParameterValue(LaunchConfiguration('viewer_port'), value_type=int),
+                          'simulator_port': ParameterValue(LaunchConfiguration('simulator_port'), value_type=int)}]),
         Node(package='phyai_discovery_ros', executable='scan', output='screen',
              namespace=LaunchConfiguration('namespace'),
              condition=IfCondition(LaunchConfiguration('auto_scan')),
