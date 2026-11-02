@@ -5,6 +5,7 @@ set -eo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$APP_DIR/../.." && pwd)"
 SIM_WS="${JUNH_WS:-$(cd "$REPO_ROOT/../.." && pwd)}"
+SCENE_CONFIG="$REPO_ROOT/sim/piper_mujoco_sim/config/lab_scene.json"
 BUILD=true
 SCAN_MODE="${AUTO_SEARCH:-true}"
 SCATTER_MODE="${SCATTER_BLOCKS:-true}"
@@ -80,7 +81,8 @@ source "$SIM_WS/install/setup.bash"
 source "$APP_DIR/sam2_env.sh"
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+echo "MuJoCo scene: $SCENE_CONFIG"
 echo "MuJoCo search: http://localhost:$HTTP_PORT (ROS_DOMAIN_ID=$ROS_DOMAIN_ID, AUTO_SEARCH=$SCAN_MODE, SCATTER_BLOCKS=$SCATTER_MODE, SCATTER_SEED=$SCATTER_SEED_VALUE, SCATTER_TABLE=$SCATTER_TABLE_VALUE)"
 echo "App workspace map: http://localhost:$HTTP_PORT/workspace"
 exec ros2 launch junh_master mujoco.launch.py "http_port:=$HTTP_PORT" "auto_search:=$SCAN_MODE" "workspace_port:=$WORKSPACE_PORT" \
-    "scatter_on_start:=$SCATTER_MODE" "scatter_seed:=$SCATTER_SEED_VALUE" "scatter_table:=$SCATTER_TABLE_VALUE"
+    "scene_config:=$SCENE_CONFIG" "scatter_on_start:=$SCATTER_MODE" "scatter_seed:=$SCATTER_SEED_VALUE" "scatter_table:=$SCATTER_TABLE_VALUE"

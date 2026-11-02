@@ -11,9 +11,14 @@ apps/junh/run_sim.sh
 apps/junh/run_sim.sh --no-build
 # Reproduce a scatter:
 SCATTER_SEED=7 apps/junh/run_sim.sh
-# Inspect the saved layout:
-SCATTER_BLOCKS=false apps/junh/run_sim.sh
+# Inspect the saved layout and arm home pose without automatic scanning:
+AUTO_SEARCH=false SCATTER_BLOCKS=false apps/junh/run_sim.sh
 ```
+
+The script passes this checkout’s `sim/piper_mujoco_sim/config/lab_scene.json`
+to both the simulator and scan planner, including with `--no-build`. This includes
+PR 3’s camera calibration and arm home pose. Automatic scanning moves the arm
+away from that home pose; use `AUTO_SEARCH=false` to inspect it.
 
 The script installs/loads the existing SAM2 runtime. Open the simulator at
 `http://localhost:23517` and select **Workspace** to see the estimated map and live 3D viewer side by side,
@@ -32,8 +37,9 @@ are excluded from the wrist fit history. If no usable overhead capture arrives
 within 5 seconds, the scan continues with the wrist survey without overhead
 retries. Accepted-frame processing retains the normal 30-second budget.
 Set `use_overhead: false` to start directly with the wrist sweep.
-The wrist then takes nine survey views around the table, including inward views
-beside the PIPER mounting post, to collect candidate locations. These views also
+The wrist then takes thirteen survey views around the table, including inward views
+beside the PIPER mounting post and views of the lower-left table area tuned for
+the saved 90° base heading, to collect candidate locations. These views also
 skip iterative pose fitting and do not confirm IDs.
 The candidate count shown during this phase is provisional, not a known true
 block count. Discovery then inspects one candidate at a time, keeping that focus
@@ -136,3 +142,9 @@ only implements the shared robot-adapter `plan_view` hook using MuJoCo geometry;
 shared ROS transport reports arrival or no feasible view. Hardware adapters use
 the same request/report contract without copying Junh's policy. See the
 [shared contract](../../src/phyai_discovery_ros/README.md#shared-candidate-focus-configuration-and-adapter-contract).
+
+The fixed survey joint targets are calibrated for the saved scene. Changing the
+arm base heading or camera mounts also changes their table coverage; rerun
+`scripts/test.sh scan` after scene calibration changes. The coverage tests check
+full block-top visibility in both orientations near the post and across the
+lower-left table quadrant, as well as collision-free survey transitions.

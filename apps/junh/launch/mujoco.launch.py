@@ -11,6 +11,8 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument('scene_config',default_value=PathJoinSubstitution([
+            FindPackageShare('piper_mujoco_sim'),'config','lab_scene.json'])),
         DeclareLaunchArgument('http_port',default_value='23517'),
         DeclareLaunchArgument('auto_search',default_value='true'),
         DeclareLaunchArgument('camera_width',default_value='640'),
@@ -20,8 +22,10 @@ def generate_launch_description():
         DeclareLaunchArgument('scatter_table',default_value='all'),
         DeclareLaunchArgument('workspace_port',default_value=PythonExpression([LaunchConfiguration('http_port'),' + 1'])),
         Node(package='junh_master',executable='sim_scan',output='screen',
-             condition=IfCondition(LaunchConfiguration('auto_search'))),
+             condition=IfCondition(LaunchConfiguration('auto_search')),
+             parameters=[{'scene_config':LaunchConfiguration('scene_config')}]),
         Node(package='piper_mujoco_sim',executable='sim',output='screen',parameters=[{
+            'scene_config':LaunchConfiguration('scene_config'),
             'publish_cameras':True,'camera_on_demand':True,'camera_rate':30.,
             'robot_mask_stationary_only':True,
             'camera_width':ParameterValue(LaunchConfiguration('camera_width'),value_type=int),
