@@ -56,18 +56,27 @@ def test_scan_views_are_upright_varied_and_paths_clear_the_scene():
 @pytest.mark.parametrize('yaw', [0., np.pi/2])
 def test_initial_overhead_and_brief_survey_cover_blocks_beside_post(yaw):
     """Check local full-face visibility; a global coverage ratio hides this hole."""
-    from piper_mujoco_sim.inspection import InspectionPlanner
     scene_path = ROOT/'sim/piper_mujoco_sim/config/lab_scene.json'
     scene = json.loads(scene_path.read_text())
     config = json.loads((ROOT/'apps/junh/config/mujoco.json').read_text())
     model = mujoco.MjModel.from_xml_string(build_scene(ROBOT, scene_path))
-    planner = InspectionPlanner(model, list(config['sim_scan']['targets'].values()),
-                                None, gripper=.035)
     # Positions 10--24 cm from the post, spanning all sides. No object truth.
     offsets = np.array([[dx, dy] for dx in np.arange(-.24, .241, .04)
                         for dy in np.arange(-.24, .241, .04)
                         if .10 <= np.hypot(dx, dy) <= .245])
     points = np.c_[offsets + scene['post_position'], np.full(len(offsets), .015)]
+    covered = _survey_coverage(model, config, scene, points, yaw)
+    assert covered.mean() >= .90, points[~covered].tolist()
+    for axis in range(2):
+        for sign in (-1, 1):
+            side = offsets[:, axis]*sign >= .08
+            assert covered[side].mean() >= .85, (axis, sign, points[side & ~covered].tolist())
+
+
+def _survey_coverage(model, config, scene, points, yaw):
+    from piper_mujoco_sim.inspection import InspectionPlanner
+    planner = InspectionPlanner(model, list(config['sim_scan']['targets'].values()),
+                                None, gripper=.035)
     rotation = np.array([[np.cos(yaw), -np.sin(yaw)],
                          [np.sin(yaw), np.cos(yaw)]])
     corners = np.array([[x, y] for x in (-.0375, .0375)
@@ -90,8 +99,18 @@ def test_initial_overhead_and_brief_survey_cover_blocks_beside_post(yaw):
         for index in np.flatnonzero(framed & ~covered):
             covered[index] = planner._visible(joints, points[index], .045,
                                               points[index] + corners)
-    assert covered.mean() >= .90, points[~covered].tolist()
-    for axis in range(2):
-        for sign in (-1, 1):
-            side = offsets[:, axis]*sign >= .08
-            assert covered[side].mean() >= .85, (axis, sign, points[side & ~covered].tolist())
+    return covered
+
+
+@pytest.mark.parametrize('yaw', [0., np.pi/2])
+def test_survey_covers_lower_left_table_after_base_rotation(yaw):
+    scene_path = ROOT/'sim/piper_mujoco_sim/config/lab_scene.json'
+    scene = json.loads(scene_path.read_text())
+    config = json.loads((ROOT/'apps/junh/config/mujoco.json').read_text())
+    model = mujoco.MjModel.from_xml_string(build_scene(ROBOT, scene_path))
+    # World X/Y lower-left quadrant, including the far edge. These are synthetic
+    # possible block locations; coverage must not depend on actual block poses.
+    points = np.array([[x, y, .015] for x in np.arange(-.78, 0, .08)
+                       for y in np.arange(-.48, 0, .08)])
+    covered = _survey_coverage(model, config, scene, points, yaw)
+    assert covered.mean() >= .95, points[~covered].tolist()
