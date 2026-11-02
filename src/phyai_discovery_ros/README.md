@@ -236,8 +236,16 @@ agree; use actual acquisition timestamps and capture-time TF.
 
 ## Runtime image launch
 
-App runtime images include the shared packages under `src/`. For an app whose
-`start.sh` launches discovery, use the normal runtime runner. The Junh test app's
+App runtime images install all shared packages under `src/` into `/ws/install`,
+including the core, generated interfaces, ROS adapter and browser viewer assets.
+Teammates can import the core inside their own app container or run discovery as
+a separate ROS service container and consume its topics/services. Their app's
+`package.xml` should declare `<exec_depend>phyai_discovery_ros</exec_depend>` for
+ROS integration, or `phyai_discovery` for Python-only embedding. Build with
+`bash scripts/build_runtime.sh <app>`; direct discovery dependencies automatically
+enable SAM2 provisioning. For indirect dependencies, set `DISCOVERY_SAM2=true`.
+
+For an app whose `start.sh` launches discovery, use the normal runtime runner. The Junh test app's
 startup uses its local SAM2 environment in development and the provisioned model
 environment in runtime images. To run shared discovery without Junh's master and
 viewer, override the image command:
@@ -247,25 +255,40 @@ viewer, override the image command:
 bash scripts/build_runtime.sh junh
 # Discovery-dependent apps automatically provision SAM2 during this build.
 # Transfer/load the image on the control PC before running the command below.
-# Put your measured installation JSON and referenced calibration/mask files here:
+# Base installation.json on discovery_rgb.json, with measured installation settings.
+# Put that JSON and referenced calibration/mask files here:
 docker run --rm -it --network host --gpus all \
   -e ROS_DOMAIN_ID=43 \
   -v /absolute/path/to/discovery-config:/config:ro \
   phyai/app-junh:latest \
   ros2 launch phyai_discovery_ros discovery.launch.py \
-  config_path:=/config/installation.json auto_scan:=false
+  config_path:=/config/installation.json auto_scan:=false \
+  with_viewer:=true viewer_port:=23518
 ```
 
-Use the host stack's ROS domain. Start observation-only, then enable
-`auto_scan:=true` with a `scan` configuration after physical poses and paths are
-validated. The image contains pinned SAM2 dependencies and weights at
+Run these Docker commands on a Docker-capable host. Export the built image with
+`docker save` and import it with `docker load`, or use
+`bash scripts/deploy.sh <app> <user@control-pc>` for the existing SSH transfer flow.
+Teammates need the image and their installation files, not the source repository
+inside the container. The entry point sources ROS, `/ws/install`, and the model
+environment before executing their command. The default command is app-specific;
+the override above starts only shared discovery and its viewer.
+
+Use the host stack's ROS domain. The viewer is at `http://localhost:23518` when
+using host networking; remote users can forward that loopback port over SSH.
+Start observation-only. Candidate-directed motion requires the teammate's
+robot-adapter process; `auto_scan:=true` starts only the generic fixed-pose
+controller and needs a validated `scan` configuration. The image contains pinned SAM2 dependencies and weights at
 `/opt/phyai-sam2`; its entry point exports the checkpoint and dependency paths.
 Your mounted installation JSON should set `segmentation.backend: sam2` and can
 omit `checkpoint` to use that exported path. Run the container with `--gpus all`
 when using CUDA (the standard runtime runner adds GPU access when available).
 `DISCOVERY_SAM2=false bash scripts/build_runtime.sh <app>` explicitly skips model
 provisioning for depth-only images; `DISCOVERY_SAM2=true` forces it for apps whose
-dependency is indirect. Native package builds and ROS integration are tested;
+dependency is indirect. The generated model configuration uses the legacy depth
+template; an RGB deployment must supply `detector.backend: rgb`, as in
+`discovery_rgb.json`, in its mounted installation JSON. Camera drivers, TF and
+robot feedback still come from the host installation. Native package builds and ROS integration are tested;
 the Docker image build and physical deployment remain unverified.
 
 ## Configure the real installation

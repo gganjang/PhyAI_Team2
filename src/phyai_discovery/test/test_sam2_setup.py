@@ -2,6 +2,7 @@
 import io
 import json
 from pathlib import Path
+import stat
 import subprocess
 
 import pytest
@@ -38,11 +39,14 @@ def test_download_is_published_only_after_model_validation(tmp_path,monkeypatch,
     def validate(python,path):
         assert not checkpoint.exists()
         assert path.read_bytes()==b'weights'
+        assert stat.S_IMODE(path.stat().st_mode)==0o600
         if not valid:raise ValueError('Bad checkpoint')
     monkeypatch.setattr(setup,'probe',validate)
     if valid:
         setup.download_checkpoint(checkpoint,Path('/python'))
         assert checkpoint.read_bytes()==b'weights'
+        # Runtime images download as root but run discovery as a different UID.
+        assert stat.S_IMODE(checkpoint.stat().st_mode)==0o644
     else:
         with pytest.raises(ValueError,match='Bad checkpoint'):
             setup.download_checkpoint(checkpoint,Path('/python'))
