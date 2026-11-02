@@ -43,6 +43,9 @@ def download_checkpoint(destination, python):
         with os.fdopen(fd,'wb') as output, urlopen(CHECKPOINT_URL,timeout=120) as source:
             shutil.copyfileobj(source,output)
         probe(python,partial)
+        # These public weights may be downloaded by root during an image build
+        # and loaded by the non-root runtime user. mkstemp starts at mode 0600.
+        partial.chmod(0o644)
         os.replace(partial,destination)
     finally:
         partial.unlink(missing_ok=True)
