@@ -85,12 +85,28 @@ Your app publishes targets; the simulator or control PC bridge receives them and
 
 | Topic | Message | Direction |
 |---|---|---|
-| `/joint_ctrl_single` *(provisional)* | `sensor_msgs/JointState`: `joint1`–`joint6` angles (rad), `joint7` gripper opening (0–0.035 m) | app → arm |
-| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` positions and velocities | arm → app |
-| Camera topics *(TBD)* | `sensor_msgs/Image`, `CameraInfo` | host → app |
-| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | host → app |
-| `/robot_description` | `std_msgs/String` (URDF) | host → app |
+| `/joint_ctrl_single` *(provisional)* | `sensor_msgs/JointState`: `joint1`–`joint6` angles (rad), `joint7` gripper opening (0–0.035 m) | app → bridge |
+| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` positions and velocities | bridge → app |
+| Camera topics *(TBD)* | `sensor_msgs/Image`, `CameraInfo` | camera driver → app |
+| `/tf` | `tf2_msgs/TFMessage`: transforms that change with time | `robot_state_publisher` and other TF publishers → app |
+| `/tf_static` | `tf2_msgs/TFMessage`: fixed transforms | `robot_state_publisher` and static TF publishers → app |
+| `/robot_description` | `std_msgs/String` (URDF) | `robot_state_publisher` → app |
 | `/sim/scene` *(simulator only)* | `std_msgs/String`: JSON block poses, robot kinematics, simulation time, pause state, restart ID | simulator → example |
+
+On the physical control PC, the bridge, camera driver, and
+`robot_state_publisher` are separate host processes. The bridge publishes measured
+joint feedback on `/joint_states`. `robot_state_publisher` subscribes to that
+feedback and uses the URDF robot description to compute link transforms: movable
+joints appear on `/tf`, and fixed joints appear on `/tf_static`. It also publishes
+the URDF on `/robot_description`; it does not command the arm.
+
+Camera drivers or dedicated transform publishers provide camera transforms as
+configured for the installation. A wrist camera can have a fixed mounting
+transform to an arm link while its transform relative to the robot base changes
+as the arm moves. Apps use joint feedback for joint configuration and velocity,
+and TF for link/camera poses in a common frame. For camera observations, use the
+transform at the image acquisition time. Collision and boundary checks also need
+robot collision geometry and scene obstacles; transforms alone describe poses.
 
 The host stack administrator confirms provisional topics and camera names. Arm commands currently
 follow the `piper_ros` convention. If the bridge uses custom messages, add their package to the base image.
@@ -102,31 +118,45 @@ are retired from that app. Camera depth is not consumed by its RGB configuration
 
 ### Use discovery in your own app
 
-The shared [discovery core](src/phyai_discovery/README.md) accepts calibrated RGB-D
-captures directly from Python. ROS apps can use
-[`phyai_discovery_ros`](src/phyai_discovery_ros/README.md) for live cameras,
-capture-time TF, stationary feedback checks, and workspace/progress topics:
+Share these three packages; Junh and MuJoCo are not required:
+
+| Package | Responsibility |
+|---|---|
+| [`phyai_discovery`](src/phyai_discovery/README.md) | Python discovery, candidate selection, view budgets, measured inventory, and browser viewer |
+| `phyai_discovery_interfaces` | `GetBlockInfo` and `ReportView` ROS services |
+| [`phyai_discovery_ros`](src/phyai_discovery_ros/README.md) | Camera/TF transport, stationary capture checks, robot-adapter integration, and standalone viewer |
+
+The RGB backend discovers known-size blocks from calibrated RGB images; block
+color and camera depth are not discovery evidence. The wrist camera supplies
+geometry, with an optional initial overhead image for candidate proposals.
+The shared core also retains its legacy depth backend for existing consumers.
 
 ```bash
-# From the colcon workspace; no Junh app or simulator is required.
+# From the colcon workspace:
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-up-to phyai_discovery_ros
 source install/setup.bash
-# From the repository root, after preparing your installation JSON:
-bash scripts/run_discovery.sh --config /absolute/path/hardware.json -- auto_scan:=false
+cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json" /tmp/team-discovery.json
+# Edit the copied camera topics, table frame/scope, dimensions, and calibration.
+# From the repository root, start observation and the viewer:
+bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
+  auto_scan:=false with_viewer:=true viewer_port:=23518
 ```
 
-For SAM2-assisted discovery with automatic dependency/model setup, use
-`bash scripts/run_discovery.sh --config /absolute/path/installation.json -- auto_scan:=false`
-after sourcing the built workspace. See the shared guide for first-run downloads
-and runtime image provisioning. Direct launch with the raw template is depth-only.
+Open **http://localhost:23518** for the workspace map, candidates, and inventory.
+To attach the viewer to an existing producer, run
+`ros2 run phyai_discovery_ros viewer --ros-args -p http_port:=23518`.
+The [shared integration guide](src/phyai_discovery_ros/README.md) covers custom
+namespaces/topics, package-only setup, and embedding the viewer directly in Python.
+SAM2 dependencies and weights are provisioned on first launch and cached afterward.
 
-Copy the shared package's configuration template and set your measured camera,
-table, and sensor error settings first. Enable `auto_scan:=true` with configured
-scan poses to let the shared PIPER controller move and capture, or have your app
-own movement and request captures. Junh adds simulator-specific geometry planning
-to the shared scan controller; physical scan poses and paths still require
-installation validation. The shared adapter is available for hardware
-integration; real-sensor accuracy and hardware trajectories still need validation.
+Discovery owns survey → focus → confirm decisions. Your robot adapter supplies
+feasible camera poses, IK/collision checks, movement, and verified arrival through
+`ReportView`. Implement `ScanNode.plan_view(request, current)` for candidate-directed
+motion; Junh supplies the MuJoCo example. Fixed-pose scans can use the generic
+controller with an installation-specific scan configuration. The observation-only
+launch above sends no arm commands. Hardware calibration, real-camera accuracy,
+and physical trajectories still require installation validation.
 
 ### Dependencies and installed files
 

@@ -84,12 +84,26 @@ apps/<name>/
 
 | 토픽 | 메시지 | 방향 |
 |---|---|---|
-| `/joint_ctrl_single` *(임시)* | `sensor_msgs/JointState`: `joint1`–`joint6` 각도 (rad), `joint7` 그리퍼 벌림 폭 (0–0.035 m) | 앱 → 팔 |
-| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` 위치와 속도 | 팔 → 앱 |
-| 카메라 토픽 *(미정)* | `sensor_msgs/Image`, `CameraInfo` | 호스트 → 앱 |
-| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | 호스트 → 앱 |
-| `/robot_description` | `std_msgs/String` (URDF) | 호스트 → 앱 |
+| `/joint_ctrl_single` *(임시)* | `sensor_msgs/JointState`: `joint1`–`joint6` 각도 (rad), `joint7` 그리퍼 벌림 폭 (0–0.035 m) | 앱 → 브리지 |
+| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` 위치와 속도 | 브리지 → 앱 |
+| 카메라 토픽 *(미정)* | `sensor_msgs/Image`, `CameraInfo` | 카메라 드라이버 → 앱 |
+| `/tf` | `tf2_msgs/TFMessage`: 시간에 따라 변하는 좌표계 변환 | `robot_state_publisher` 및 기타 TF 발행 노드 → 앱 |
+| `/tf_static` | `tf2_msgs/TFMessage`: 고정 좌표계 변환 | `robot_state_publisher` 및 정적 TF 발행 노드 → 앱 |
+| `/robot_description` | `std_msgs/String` (URDF) | `robot_state_publisher` → 앱 |
 | `/sim/scene` *(시뮬레이터 전용)* | `std_msgs/String`: 블록 위치, 로봇 운동학, 시뮬레이션 시간, 일시 정지 상태와 재시작 ID의 JSON | 시뮬레이터 → example |
+
+실제 제어 PC에서는 브리지, 카메라 드라이버, `robot_state_publisher`가 각각 별도
+호스트 프로세스로 실행됩니다. 브리지는 `/joint_states`에 측정된 관절 상태를 발행합니다.
+`robot_state_publisher`는 이 상태를 구독하고 URDF의 로봇 구조를 이용해 링크 간 변환을
+계산합니다. 움직이는 관절의 변환은 `/tf`, 고정 관절의 변환은 `/tf_static`에 발행합니다.
+URDF 자체도 `/robot_description`에 발행하며, 팔에 동작 명령을 보내지는 않습니다.
+
+카메라 변환은 설치 구성에 따라 카메라 드라이버나 별도 TF 노드가 제공합니다.
+손목 카메라와 장착 링크 사이의 변환은 고정이어도, 로봇 베이스에 대한 카메라의 위치와
+방향은 팔이 움직이면 달라집니다. 앱은 관절 구성과 속도에 `/joint_states`를 사용하고,
+공통 좌표계에서 링크와 카메라의 자세를 구할 때 TF를 사용합니다. 카메라 관측에는
+이미지 취득 시점의 변환을 사용해야 합니다. 충돌 및 경계 검사에는 로봇의 충돌 형상과
+장애물 정보도 필요하며, 좌표계 변환만으로는 점유 공간을 알 수 없습니다.
 
 임시 토픽과 카메라 이름은 호스트 스택 담당자가 확정합니다. 팔 명령은 현재 `piper_ros` 규칙을 따릅니다.
 브리지가 커스텀 메시지를 사용하면 해당 패키지를 base 이미지에 추가해야 합니다.
@@ -101,27 +115,42 @@ RGB 영상으로 테이블을 선회하며 탐색합니다. 오버헤드 카메�
 
 ### 다른 앱에서 discovery 사용
 
-[공유 discovery](src/phyai_discovery/README.md)는 RGB-D에서 블록 위치와 자세를 추정합니다.
-ROS 앱은 [phyai_discovery_ros](src/phyai_discovery_ros/README.md)를 사용하면 됩니다.
-`package.xml`에 `<exec_depend>phyai_discovery_ros</exec_depend>`를 추가하세요.
+Junh나 MuJoCo 없이 다음 세 패키지를 공유해 사용할 수 있습니다.
+
+| 패키지 | 역할 |
+|---|---|
+| [phyai_discovery](src/phyai_discovery/README.md) | Python 탐색, 후보 선택, 관측 횟수 관리, 블록 정보와 브라우저 뷰어 |
+| phyai_discovery_interfaces | `GetBlockInfo`, `ReportView` ROS 서비스 |
+| [phyai_discovery_ros](src/phyai_discovery_ros/README.md) | 카메라/TF 연결, 정지 확인, 로봇 어댑터와 독립 뷰어 |
+
+RGB 백엔드는 알려진 크기의 블록을 보정된 RGB 영상으로 탐색합니다. 블록 색상과
+카메라 깊이 영상은 탐색 근거로 사용하지 않습니다. 손목 카메라가 형상을 관측하고,
+오버헤드 카메라는 초기 후보를 제공하는 선택적 보조입니다.
 
 ```bash
 # colcon 워크스페이스에서 실행
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-up-to phyai_discovery_ros
 source install/setup.bash
+cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json" /tmp/team-discovery.json
+# 복사한 파일의 카메라 토픽, 테이블 좌표계/범위, 블록 크기와 보정 정보를 수정하세요.
 # 저장소 루트에서 실행: SAM2 설치와 모델 다운로드를 자동으로 수행합니다.
-bash scripts/run_discovery.sh --config /absolute/path/installation.json -- auto_scan:=false
+bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
+  auto_scan:=false with_viewer:=true viewer_port:=23518
 ```
 
-기본값은 관측 전용입니다. 설치 환경에 맞는 `scan` 설정과 검증된 이동 경로가 있으면
-`auto_scan:=true`로 공유 PIPER 제어기가 팔 이동과 촬영을 수행합니다. 시뮬레이터와
-실제 브리지는 같은 토픽·메시지 규칙을 사용하고, `ROS_DOMAIN_ID`로 환경을 선택합니다.
-카메라 내부 파라미터는 CameraInfo 또는 JSON 파일로 제공하며, 외부 파라미터는 촬영 시각의 TF를 사용합니다.
+**http://localhost:23518**에서 작업공간 맵과 후보, 블록 정보를 확인합니다.
+이미 실행 중인 discovery에 뷰어만 연결하려면
+`ros2 run phyai_discovery_ros viewer --ros-args -p http_port:=23518`을 사용합니다.
+네임스페이스/토픽 변경과 Python 직접 사용 방법은
+[공유 통합 가이드](src/phyai_discovery_ros/README.md)를 참고하세요.
 
-검색 완료 후 `/discovery/get_block_info`의
-`phyai_discovery_interfaces/srv/GetBlockInfo` 서비스로 블록 정보를 조회할 수 있습니다.
-`/discovery/state`는 검색 상태와 세션·리비전을 제공합니다. Junh 브라우저는 검색이 끝나면
-동일한 API를 `/junh/get_block_info`에서 조회해 블록 위치와 yaw를 표시합니다.
+공유 discovery가 survey → focus → confirm 과정과 후보별 관측 횟수를 관리합니다.
+로봇 어댑터는 도달 가능한 카메라 자세, IK/충돌 검사, 이동 및 도착 확인을 담당하고
+`ReportView`로 결과를 전달합니다. 후보 중심 이동은
+`ScanNode.plan_view(request, current)`를 구현하며 Junh가 MuJoCo 예제를 제공합니다.
+위의 관측 전용 실행은 팔 명령을 보내지 않습니다. 카메라 자세는 촬영 시각의 TF를 사용합니다.
+완료된 블록 정보는 `/discovery/get_block_info`에서 조회할 수 있습니다.
 
 실제 하드웨어의 경로·정확도와 Docker 런타임 배포는 아직 검증하지 않았습니다.
 discovery 의존성을 선언한 앱은 런타임 이미지 빌드 시 SAM2와 모델을 자동으로 설치합니다.

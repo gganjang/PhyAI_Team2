@@ -190,7 +190,7 @@ Use the shared launcher for the advertised SAM2-assisted discovery backend:
 ```bash
 # After building and sourcing the ROS workspace, from the repository root:
 bash scripts/run_discovery.sh --config /absolute/path/installation.json -- auto_scan:=false
-# After validating physical scan paths, use auto_scan:=true instead.
+# auto_scan:=true starts the generic fixed-pose controller, not a custom focus planner.
 ```
 
 The launcher automatically creates/reuses `.discovery-sam2/`, installs pinned
@@ -370,7 +370,9 @@ ros2 launch phyai_discovery_ros discovery.launch.py \
   config_path:=/absolute/path/installation.json auto_scan:=true
 ```
 
-`auto_scan` defaults to false, retaining observation-only operation. When enabled,
+`auto_scan` starts the generic fixed-pose controller and defaults to false.
+For candidate-directed scanning, launch your robot-adapter subclass separately
+and leave `auto_scan:=false` to avoid starting a second controller. When enabled,
 the same configuration must include a `scan` section. The installed
 `config/piper_scan.example.json` contains the existing 11 survey poses, eight
 reserve poses and PIPER joint limits, with slower motion settings and a closed
@@ -395,12 +397,15 @@ acceleration, waits for measured arrival (arm error <0.025 rad and gripper error
 stationarity. It waits for a command subscriber and refuses competing command
 publishers; this is a ROS graph check, not an atomic bridge control lease.
 
-The shared controller needs no `/sim/scene` or MuJoCo installation. It uses fixed
-survey/reserve targets from the installation configuration. The Junh simulator
-extension uses this same execution logic with simulated time, pause/restart guards,
-and its geometry-based targeted inspection planner. Dynamic targeted-view planning
-for hardware remains separate work; the shared controller does not substitute
-simulator block truth for camera observations.
+The shared controller needs no `/sim/scene` or MuJoCo installation. With
+candidate-focus policy disabled, it uses fixed survey/reserve targets from the
+installation configuration. With the policy enabled, survey targets are fixed
+and focused request slots are planned by your `ScanNode.plan_view(request, current)`
+implementation. The generic executable does not include hardware IK or a collision
+planner; enable candidate-directed motion through your robot-adapter subclass.
+Junh supplies the MuJoCo implementation using the same execution logic with
+simulated time and pause/restart guards. Simulator block truth is never a
+substitute for camera observations.
 
 `/discovery/scan_status` publishes motion status and faults. Call
 `/discovery/stop_scan` (`std_srvs/srv/Trigger`) to latch cancellation; it stops the
@@ -414,7 +419,10 @@ stops publishing commands, leaving the inventory available to consumers.
 
 ## App interface
 
-All JSON messages use `std_msgs/msg/String`; services use `std_srvs/srv/Trigger`.
+JSON topics use `std_msgs/msg/String`. Capture/lifecycle/stop services use
+`std_srvs/srv/Trigger`; inventory queries use
+`phyai_discovery_interfaces/srv/GetBlockInfo`, and robot view reports use
+`phyai_discovery_interfaces/srv/ReportView`.
 The default names at the root namespace are:
 
 | Interface | Purpose |
@@ -422,7 +430,8 @@ The default names at the root namespace are:
 | `/discovery/workspace` | Core `workspace` + `search` snapshot, input status and errors |
 | `/discovery/state` | Latched compact discovery state, completion flag and inventory identity |
 | `/discovery/get_block_info` | GetBlockInfo service for the finished inventory |
-| `/discovery/search_progress` | Scan state, requested `search.target`, inspection targets |
+| `/discovery/search_progress` | Scan state, requested `search.target`, inspection targets, correlated `view_request` and candidate budget status |
+| `/discovery/report_view` | Report verified arrival or an unreachable view, echoing the current session and request IDs |
 | `/discovery/overhead/overlay`, `/discovery/wrist/overlay` | Annotated RGB, when RGB is supplied |
 | `/discovery/capture` | Request the next wrist observation after positioning |
 | `/discovery/restart_scan` | Clear inventory and begin a fresh overhead observation |
@@ -430,23 +439,29 @@ The default names at the root namespace are:
 | `/discovery/end_inspection` | End reserve inspection between captures |
 | `/discovery/add_view` | Add a bounded manual view after finishing |
 
-With `auto_scan:=true`, discovery moves and captures automatically; your app waits
-for `search_finished` and reads the inventory. With `auto_scan:=false`, the
-perception adapter publishes no arm commands, and your app should:
+With a configured fixed-pose controller or your candidate-focus robot adapter,
+movement and capture are coordinated automatically. Your app waits for
+`search_finished` and reads the inventory. The perception adapter itself publishes
+no arm commands. To supply movement from your application:
 
 1. Start camera drivers, calibrated TF and fresh joint feedback, then discovery.
-   A stationary overhead capture is acquired automatically.
-2. Watch `search.state == "wait_for_wrist_view"` and `search.target`. Move the arm
-   to that physical view, verify arrival and settling, then call capture:
+   A stationary overhead capture is acquired automatically when `use_overhead` is true.
+2. With candidate-focus policy enabled, watch `view_request` in progress, move
+   to the requested survey/focus view, verify arrival, and report `arrived` through
+   `ReportView` using that request's IDs. Discovery requests capture internally.
+   For legacy/manual fixed scans with the policy disabled, watch
+   `search.state == "wait_for_wrist_view"` and `search.target`, verify arrival,
+   then request capture directly:
 
    ```bash
    ros2 service call /discovery/capture std_srvs/srv/Trigger '{}'
    ```
 
 3. Check the service's `success` field, then wait for the next requested view or
-   `search_finished`. During reserve rounds, your app may plan around perceived
-   `workspace.inspection_targets` from progress messages. The shared adapter
-   supplies those estimates; it does not generate joint trajectories.
+   `search_finished`. Candidate selection and budgets stay in shared discovery;
+   the application plans only the selected focus. Legacy fixed-scan consumers
+   may use `workspace.inspection_targets` from progress messages. Discovery
+   supplies measured estimates and does not generate joint trajectories.
 4. Pass confirmed tracks, coordinate frame, uncertainty and final status to the
    next stage. Inspect `criteria_met`, remaining hypotheses and per-track bounds.
    `pick_ready` is always false; discovery does not validate a grasp.
@@ -536,6 +551,11 @@ PYTHONPATH=src/phyai_discovery:src/phyai_discovery_ros \
 
 The RGB template enables `candidate_focus.enabled: true`. Configure
 `candidate_focus.max_views_per_candidate` (default 3) for a bounded session.
+Junh overrides this to 4; its nine survey views and 32 reserved focus slots are
+app configuration, not shared-core defaults. The total slot cap and per-candidate
+cap both apply, so size the slot list for your expected workload and latency
+budget. Exhausting slots retains a partial result rather than assuming all
+objects have been found.
 `viewpoints` names the brief survey; `inspection_rounds` supplies bounded names for
 focused observations. Those names are request slots, not candidate IDs. Dynamic
 inspection slots do not need fixed joint targets; only survey poses are required
