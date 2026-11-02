@@ -22,7 +22,8 @@ feature = Discovery({
     "scope": [-0.8, 0.8, -0.5, 0.5],  # replace with your measured table
     "use_overhead": False,
     "viewpoints": ["left", "right"],
-    "detector": {"backend": "rgb", "known_block_size": [0.075, 0.025, 0.015]},
+    "detector": {"backend": "rgb", "known_block_size": [0.075, 0.025, 0.015],
+                 "proposal_only_viewpoints": ["left", "right"]},
     "segmentation": {"backend": "sam2"},  # checkpoint comes from sourced env
     "search_criteria": {"min_wrist_views": 2},
     "candidate_focus": {"enabled": True, "max_views_per_candidate": 3},
@@ -57,11 +58,13 @@ robot adapter reports `arrived` or `unreachable` through `feature.report_view()`
 The ROS adapter and viewer have
 a [shared quick-start](../phyai_discovery_ros/README.md#teammate-quick-start-rgb-discovery-and-viewer).
 
-# Shared discovery feature
+## Legacy depth backend and shared lifecycle
 
 `phyai_discovery` is the reusable discovery stage for the team's integrated app.
 It runs without ROS or MuJoCo. NumPy is the only runtime dependency for depth
 processing; SAM2/PyTorch are loaded only when SAM2 segmentation is configured.
+The depth-specific behavior below applies to `detector.backend: depth`. The
+capture lifecycle, search policy and inventory APIs are shared with RGB discovery.
 
 ```text
 camera / recording adapter -> Capture -> Discovery -> workspace + search result
@@ -146,13 +149,16 @@ The adapter must verify synchronization, freshness, and stationarity before
 passing `stationary=True`. Use `Stationarity` for the current seven-joint arm's
 feedback, or supply equivalent verification for your hardware.
 
-For RGB-only inputs, set `Capture.depth=None`, supply RGB pixels and pass an
-explicit `phyai_discovery.rgb.RGBDetector` to `Discovery(detector=...)`. This
-experimental backend uses calibrated known-size silhouette fits. The same shared
-search, cross-view identity association and final naming/order lifecycle applies.
-RGB observations do not populate measured table geometry or surface coverage.
-A finished RGB inventory can be partial and is never marked grasp-ready. The ROS adapter also supports direct RGB acquisition when `detector.backend` is
-`rgb`; Junh's discovery-only launch uses this mode.
+For RGB-only inputs, set `Capture.depth=None`, supply RGB pixels and select
+`detector.backend: rgb` with known dimensions, a table scope and SAM2, as in the
+example above. `Discovery` constructs the RGB detector; explicit detector injection
+is optional. The configured backend fits known-size silhouettes and tracks visible
+tabletop coverage against the installation plane at Z=0. That plane is a prior,
+not a depth measurement, and no depth image is manufactured. A custom
+`RGBDetector` constructed without `table_coverage=True` supplies object evidence
+without table coverage. The shared cross-view identity and search lifecycle apply
+in both cases. A finished RGB inventory can be partial and is never grasp-ready.
+The ROS adapter supports the same RGB configuration used by Junh.
 
 ```python
 from phyai_discovery import Discovery, SearchState
@@ -183,7 +189,9 @@ Drive `tick(now, stationary=...)` periodically with a monotonic clock, including
 while waiting for sensors or processing, to enforce timeouts. Timestamped
 `Capture.stamp` uses the sensor acquisition clock; keep it separate from the
 monotonic timeout clock. The initial overhead observation is requested automatically.
-Wrist observations require `request_capture()` and a stationary `tick()` first.
+Manual/fixed-pose wrist observations require `request_capture()` and a stationary
+`tick()` first. With candidate-focus policy enabled, report the current request's
+verified arrival through `report_view()` instead; it requests capture internally.
 `finish()` ends a scan early; `add_view()` adds a bounded manual inspection view
 after finishing. Automatic inspection rounds and search criteria use the existing
 `search_criteria` and `inspection_rounds` configuration keys.
@@ -199,24 +207,25 @@ failed detection jobs before re-raising their exception.
 
 ## Result contract
 
-`snapshot()` returns the existing `workspace` and `search` envelope. ROS/app
+`snapshot()` returns `workspace`, `search`, `view_request`, and `candidate_focus`. ROS/app
 metadata such as `input_mode`, stream ages, and simulator restart IDs belongs to
 adapters. Existing `/junh/discovery` consumers continue to receive their envelope.
 
 | Field | Meaning for the next pipeline stage |
 | --- | --- |
 | `workspace.session_id`, `revision`, `frame` | Inventory identity, version, coordinate frame |
-| `workspace.table`, `coverage` | Measured table evidence and observation coverage |
+| `workspace.table`, `coverage` | Depth-measured or RGB installation-prior table geometry, and observation coverage |
 | `workspace.tracks` | Confirmed IDs, geometry, uncertainty, and resolution state |
 | `workspace.hypotheses`, `warnings` | Evidence requiring further observation |
 | `search.state`, `target` | Scan state and requested physical viewpoint |
 | `search.result.status` | `failed`, `partial`, or `complete` after scan termination |
 | `search.result.criteria_met` | Whether configured observation criteria were met |
 | `search.result.pick_ready` | Always false; discovery does not validate a grasp |
+| `view_request` | Current correlated survey/focus request, or null when no request is active |
+| `candidate_focus` | Selected candidate, per-candidate acquired-view counts, configured cap and unavailable reasons; null when disabled |
 
 A finished sequence may produce partial results. Planning must inspect uncertainty
 and scan outcome; discovery alone does not authorize picking or execute motion.
-The existing `junh_master.handoff.Master` remains a prototype consumer in the test app.
 
 For inter-app retrieval after a ROS scan, use
 [`GetBlockInfo`](../phyai_discovery_ros/README.md#query-block-information-after-discovery).
