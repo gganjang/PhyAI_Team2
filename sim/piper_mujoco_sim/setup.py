@@ -1,8 +1,16 @@
 from glob import glob
+from pathlib import Path
 
 from setuptools import find_packages, setup
 
 package_name = 'piper_mujoco_sim'
+
+
+def existing_assets(pattern):
+    # Colcon's symlink-install build directory can retain dangling links after
+    # source assets are removed. glob() includes those links; installers cannot.
+    return sorted(path for path in glob(pattern) if Path(path).is_file())
+
 
 setup(
     name=package_name,
@@ -12,8 +20,8 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
-        ('share/' + package_name + '/config', glob('config/*.json')),
+        ('share/' + package_name + '/launch', existing_assets('launch/*.launch.py')),
+        ('share/' + package_name + '/config', existing_assets('config/*.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
