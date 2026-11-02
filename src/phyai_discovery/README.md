@@ -68,7 +68,7 @@ camera / recording adapter -> Capture -> Discovery -> workspace + search result
                                             |
                             optional SAM2 -> measured depth geometry
 
-integrated app: discovery -> planning -> safecheck -> execution
+integrated app: discovery -> planning -> execution
 junh test app:  discovery + ROS transport + MuJoCo scan driver + workspace viewer
 ```
 
@@ -215,7 +215,7 @@ adapters. Existing `/junh/discovery` consumers continue to receive their envelop
 | `search.result.pick_ready` | Always false; discovery does not validate a grasp |
 
 A finished sequence may produce partial results. Planning must inspect uncertainty
-and scan outcome; discovery alone does not authorize picking or bypass safecheck.
+and scan outcome; discovery alone does not authorize picking or execute motion.
 The existing `junh_master.handoff.Master` remains a prototype consumer in the test app.
 
 For inter-app retrieval after a ROS scan, use

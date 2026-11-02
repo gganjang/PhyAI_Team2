@@ -212,7 +212,7 @@ class Search:
                        'snapshot_revision': snap['revision'], 'reason': reason,
                        'stop_reason':stop_reason,
                        'criteria_met': self.assessment['met'] if self.assessment is not None else None,
-                       'pick_ready': False}  # grasp geometry and safecheck validation remain unverified
+                       'pick_ready': False}  # grasp geometry and motion execution remain unverified
 
     def progress(self):
         return {'state': self.state.value, 'viewpoint_index': self.index,
