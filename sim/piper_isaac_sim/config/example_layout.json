@@ -1,0 +1,155 @@
+{
+  "table_size": [
+    0.84,
+    0.54
+  ],
+  "table_gap": 0.001,
+  "table_height": 0.75,
+  "table_thickness": 0.025,
+  "lighting": {
+    "ceiling_height": 2.25,
+    "ambient": [
+      0.3,
+      0.3,
+      0.3
+    ],
+    "camera_fill": [
+      0.2,
+      0.2,
+      0.2
+    ],
+    "diffuse": [
+      0.3,
+      0.3,
+      0.3
+    ],
+    "specular": [
+      0.02,
+      0.02,
+      0.02
+    ]
+  },
+  "post_radius": 0.04,
+  "post_position": [
+    0.1,
+    -0.08
+  ],
+  "robot_yaw_degrees": 145,
+  "overhead_position": [
+    0.1392,
+    0.5083,
+    0.89
+  ],
+  "camera_fovy": 54,
+  "overhead_camera_fovy": 33.0,
+  "wrist_camera_position": [
+    0.02,
+    0.02,
+    0.0
+  ],
+  "wrist_camera_quaternion": [
+    0.5,
+    0.5,
+    0.5,
+    -0.5
+  ],
+  "wrist_camera_roll_degrees": 0,
+  "wrist_camera_mount_position": [
+    0.0457,
+    -0.0997,
+    0.0096
+  ],
+  "wrist_camera_mount_quaternion": [
+    0.977531,
+    0.012536,
+    -0.006185,
+    0.210326
+  ],
+  "block_size": [
+    0.075,
+    0.025,
+    0.015
+  ],
+  "block_mass": 0.02,
+  "block_friction": [
+    0.8,
+    0.005,
+    0.0001
+  ],
+  "block_positions": [
+    [
+      0.4,
+      -0.25
+    ],
+    [
+      0.53,
+      -0.25
+    ],
+    [
+      0.4,
+      -0.33
+    ],
+    [
+      0.53,
+      -0.33
+    ],
+    [
+      0.4,
+      -0.41
+    ],
+    [
+      0.53,
+      -0.41
+    ]
+  ],
+  "overhead_quaternion": [
+    0.986155,
+    -0.165756,
+    0.000134,
+    -0.004789
+  ],
+  "block_rgba": [
+    [
+      0.12,
+      0.35,
+      0.85,
+      1
+    ],
+    [
+      0.15,
+      0.62,
+      0.25,
+      1
+    ],
+    [
+      0.55,
+      0.2,
+      0.75,
+      1
+    ],
+    [
+      0.1,
+      0.68,
+      0.75,
+      1
+    ],
+    [
+      0.85,
+      0.15,
+      0.12,
+      1
+    ],
+    [
+      0.9,
+      0.8,
+      0.15,
+      1
+    ],
+    [
+      0.9,
+      0.9,
+      0.9,
+      1
+    ]
+  ]
+}

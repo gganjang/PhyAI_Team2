@@ -1,0 +1,80 @@
+#!/bin/bash
+# One-person-at-a-time lock for the shared GPU server (account phyai).
+#   phyai-lock take "<purpose>" [hours]   take the server (default 2 h)
+#   phyai-lock status                     show who holds it
+#   phyai-lock release                    release your lock
+#   phyai-lock take --force "<purpose>" [hours]   take over an EXPIRED lock held by someone else
+# Your name comes from $PHYAI_USER (set it in your SSH session), or you are asked once.
+# Lock file: $PHYAI_ROOT/LOCK; every action is logged to $PHYAI_ROOT/logs/usage.log.
+set -eo pipefail
+ROOT=${PHYAI_ROOT:-/srv/phyai}
+LOCK="$ROOT/LOCK"
+LOG="$ROOT/logs/usage.log"
+mkdir -p "$ROOT/logs"
+
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+now() { date +%s; }
+stamp() { date '+%F %T'; }
+log() { echo "$(stamp) $*" >> "$LOG"; }
+field() { [ -f "$LOCK" ] && sed -n "s/^$1=//p" "$LOCK" || true; }
+
+who_am_i() {
+    local name=${PHYAI_USER:-}
+    if [ -z "$name" ]; then
+        [ -t 0 ] || { echo "Set PHYAI_USER=<your name> first." >&2; exit 1; }
+        read -rp "Your name: " name
+    fi
+    [[ "$name" =~ ^[A-Za-z0-9._@-]+$ ]] || { echo "Use letters, digits, . _ @ - for the name." >&2; exit 1; }
+    echo "$name"
+}
+
+show() {
+    if [ ! -f "$LOCK" ]; then echo "free"; return; fi
+    local until left
+    until=$(field until)
+    left=$(( until - $(now) ))
+    if [ "$left" -gt 0 ]; then
+        echo "held by $(field user) for \"$(field purpose)\" since $(date -d @"$(field since)" '+%F %T'), $((left / 60)) min left"
+    else
+        echo "EXPIRED: held by $(field user) for \"$(field purpose)\", expired $(( -left / 60 )) min ago"
+    fi
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+    status) show ;;
+    take)
+        force=0
+        if [ "${1:-}" = --force ]; then force=1; shift; fi
+        purpose=${1:-}; hours=${2:-2}
+        [ -n "$purpose" ] || usage
+        [[ "$hours" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "hours must be a number" >&2; exit 1; }
+        me=$(who_am_i)
+        if [ -f "$LOCK" ] && [ "$(field user)" != "$me" ]; then
+            if [ "$(field until)" -gt "$(now)" ]; then
+                echo "Server is $(show). Ask them, or wait." >&2; exit 2
+            elif [ "$force" != 1 ]; then
+                echo "Server is $(show). Use --force to take it over." >&2; exit 2
+            fi
+            log "FORCE $me took over expired lock of $(field user)"
+        fi
+        until=$(( $(now) + $(awk -v h="$hours" 'BEGIN { printf "%d", h * 3600 }') ))
+        tmp=$(mktemp "$ROOT/.lock.XXXXXX")
+        printf 'user=%s\npurpose=%s\nsince=%s\nuntil=%s\n' "$me" "${purpose//$'\n'/ }" "$(now)" "$until" > "$tmp"
+        mv "$tmp" "$LOCK"
+        log "TAKE $me ${hours}h \"$purpose\""
+        show ;;
+    release)
+        me=$(who_am_i)
+        if [ ! -f "$LOCK" ]; then echo "free"; exit 0; fi
+        if [ "$(field user)" != "$me" ]; then echo "Lock is held by $(field user), not $me." >&2; exit 2; fi
+        rm -f "$LOCK"
+        log "RELEASE $me"
+        echo "released" ;;
+    check)
+        # For run scripts: succeed only if the caller holds a valid lock.
+        me=$(who_am_i)
+        if [ -f "$LOCK" ] && [ "$(field user)" = "$me" ] && [ "$(field until)" -gt "$(now)" ]; then exit 0; fi
+        echo "Take the server first: phyai-lock take \"<purpose>\" [hours]   (now: $(show))" >&2; exit 2 ;;
+    *) usage ;;
+esac
