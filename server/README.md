@@ -60,6 +60,35 @@ ACCEPT_EULA=Y server/run_phyai_lab.sh       # 실험실 씬 + ROS 2 시뮬 시�
 - **잠금 규칙:** 다른 사람의 잠금이 유효하면 실행 스크립트가 거부합니다. 만료된 잠금은
   `server/phyai-lock take --force "<목적>"`으로 넘겨받을 수 있고, 모든 기록은 `/srv/phyai/logs/usage.log`에 남습니다.
 
+### 화면 보기: WebRTC Streaming Client
+
+1. **설치(PC마다 한 번):** [Isaac Sim 다운로드 페이지](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html#isaac-sim-latest-release)에서 **Isaac Sim WebRTC Streaming Client**를
+   받아 설치합니다(Windows, macOS, Linux).
+2. **접속:**
+   1. 서버에서 시뮬을 먼저 띄웁니다(위의 `run_phyai_lab.sh`, `command: /joint_ctrl_single`이 나올 때까지 약 30초).
+   2. 클라이언트의 서버 주소 칸에 `192.168.50.57`을 넣고 **Connect**를 누릅니다.
+   3. 몇 초 뒤 실험실 씬(책상, PiPER, 블록)이 보이면 정상입니다.
+3. **화면 조작(뷰포트 안에서):**
+   - 회전: Alt + 왼쪽 드래그
+   - 이동: 가운데 버튼 드래그
+   - 확대·축소: 휠
+   - 날아다니며 보기: 오른쪽 버튼 + W/A/S/D
+   - 선택한 물체로 맞추기: F
+4. **주의:**
+   - **한 명만:** 동시에 한 명만 접속할 수 있습니다.
+   - **보기용:** 실험실 시뮬에서는 화면의 **Play/Stop을 누르지 않습니다**. 물리는 스크립트가 돌리고, 로봇 제어는
+     ROS(`ROS_DOMAIN_ID=50`)로 합니다.
+   - **창 닫기:** 클라이언트 창을 닫아도 시뮬은 계속 돕니다. 끝낼 때는 `run_phyai_lab.sh stop`과
+     `phyai-lock release`를 실행합니다.
+   - **LAN 전용:** 같은 LAN에서만 씁니다. 스트리밍에는 인증·암호화가 없으니 포트를 외부(인터넷)에 절대 열지 않습니다.
+5. **연결이 안 될 때:**
+   - **화면이 검게 나오면:** 클라이언트 메뉴의 **View > Reload**를 누르거나 다시 Connect 합니다.
+   - **시뮬이 떠 있는지:** `ssh phyai-shared "docker ps"`에서 `phyai-lab`이나 `phyai-isaac`이 Up인지 확인합니다.
+   - **다른 사람 접속:** 이미 다른 사람이 보고 있지 않은지 확인합니다.
+   - **서버 방화벽:** 서버 ufw에 49100/tcp, 47998/udp가 열려 있어야 합니다(관리자, 처음 한 번).
+   - **내 PC 방화벽:** Windows 방화벽이 클라이언트를 막지 않도록, 처음 실행할 때 나오는 허용 창에서
+     **허용**을 누릅니다.
+
 ### 주의
 
 - **팀원 제외:** 접속할 수 있는 팀원 누구나 `/home/phyai/.ssh/authorized_keys`에서 그 사람의 줄을 지우면 됩니다.
@@ -165,6 +194,31 @@ Only one viewer can be connected.
 
 **License:** `ACCEPT_EULA=Y` is your own acceptance of the NVIDIA Isaac Sim license. Read it before you set it.
 `PRIVACY_CONSENT` defaults to `N`.
+
+### Viewing: WebRTC Streaming Client
+
+1. **Install (once per PC):** get the **Isaac Sim WebRTC Streaming Client** (Windows, macOS, Linux) from the
+   [Isaac Sim download page](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html#isaac-sim-latest-release).
+2. **Connect:** start the sim first (`run_phyai_lab.sh`, wait for `command: /joint_ctrl_single`). Enter
+   `192.168.50.57` as the server and press **Connect**.
+3. **Viewport controls:**
+   - orbit: Alt + left-drag
+   - pan: middle-drag
+   - zoom: wheel
+   - fly: right-drag + W/A/S/D
+   - frame the selection: F
+4. **Rules:**
+   - **One viewer:** only one client can be connected at a time.
+   - **View only:** in the lab sim, don't press **Play/Stop**. The script steps physics and the robot is
+     controlled over ROS (`ROS_DOMAIN_ID=50`).
+   - **Closing the client:** this does not stop the sim.
+   - **LAN only:** the stream has no authentication or encryption, so never expose its ports outside the LAN.
+5. **Troubleshooting:**
+   - **Black screen:** **View > Reload**, or connect again.
+   - **Sim not running:** check `ssh phyai-shared "docker ps"`.
+   - **Someone else connected:** wait for them to disconnect.
+   - **Server firewall:** ufw must allow 49100/tcp and 47998/udp.
+   - **Windows Firewall:** allow the client when Windows asks on first launch.
 
 ## 3. Administer
 
