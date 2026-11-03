@@ -9,13 +9,14 @@
 
 서버와 **같은 LAN(192.168.50.x)**에 있어야 접속할 수 있습니다.
 
-1. 자기 PC의 PowerShell에서 SSH 키를 만들고, 공개키(`.pub`)를 관리자(정진수)에게 보냅니다.
+1. 자기 PC의 PowerShell에서 SSH 키를 만들고, 공개키(`.pub`)를 **이미 접속할 수 있는 팀원 누구에게나** 보냅니다.
    공개키는 보내도 안전합니다.
    ```powershell
    ssh-keygen -t ed25519
    Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub
    ```
-2. 관리자가 받은 공개키 한 줄을 서버에 등록합니다.
+2. 그 팀원이 받은 공개키 한 줄을 서버에 등록합니다. 관리자 권한은 필요 없습니다(`phyai`가 자기 키 목록을
+   직접 고칠 수 있음). 한 번 등록하면 그 뒤로는 언제든 바로 접속합니다.
    ```bash
    ssh phyai-shared "echo '<공개키 한 줄>' >> ~/.ssh/authorized_keys"
    ```
@@ -61,19 +62,23 @@ ACCEPT_EULA=Y server/run_phyai_lab.sh       # 실험실 씬 + ROS 2 시뮬 시�
 
 ### 주의
 
+- **팀원 제외:** 접속할 수 있는 팀원 누구나 `/home/phyai/.ssh/authorized_keys`에서 그 사람의 줄을 지우면 됩니다.
 - **개인 작업:** `/srv/phyai/repo`는 모두가 같이 씁니다. 코드를 고칠 때는 개인 브랜치나
   `git worktree add /srv/phyai/work/<이름> -b <이름>/<작업>`으로 만든 개인 작업 폴더를 쓰고,
   공용 체크아웃의 브랜치는 바꾸지 않습니다.
 
 ### 관리자(서버 sudo 권한자)만
 
-- **방화벽:** 스트리밍 포트는 관리자가 열어야 합니다.
+일상적인 사용과 팀원 키 관리에는 관리자가 필요 없습니다. sudo가 필요한 일만 관리자가 합니다.
+
+- **방화벽(처음 한 번):** 스트리밍 포트를 엽니다.
   ```bash
   sudo ufw allow 49100/tcp
   sudo ufw allow 47998/udp
   ```
-- **업그레이드:** `do-release-upgrade`, NVIDIA 드라이버 변경을 하지 않습니다. 지금 구성으로 검증됐습니다.
-- **팀원 제외:** `/home/phyai/.ssh/authorized_keys`에서 그 사람의 줄을 지웁니다.
+- **드라이버·OS:** `do-release-upgrade`나 NVIDIA 드라이버 변경은 하지 않습니다. 지금 구성으로 검증됐습니다.
+- **복구:** 서버나 Docker가 이상할 때의 재시작·복구.
+- **예비 관리자:** 관리자가 없을 때를 대비해, 자기 sudo 계정을 가진 예비 관리자를 한 명 둡니다(담당자 미정).
 
 시뮬레이터 상세 내용과 검증 결과는 [sim/piper_isaac_sim](../sim/piper_isaac_sim/README.md)에 있습니다.
 아래는 같은 내용의 영어 설명입니다.
@@ -97,14 +102,15 @@ Everyone logs in to the shared account **`phyai`**: SSH key only, `docker` group
 **What:** Log in from your PC with an SSH key.
 
 **How:** Create a key on Windows (PowerShell) if you have none, and send the **public** key
-(`id_ed25519.pub`) to someone who already has access.
+(`id_ed25519.pub`) to any teammate who can already log in.
 
 ```powershell
 ssh-keygen -t ed25519
 Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub
 ```
 
-They append it on the server (one line per person):
+They append it on the server (one line per person). No admin is needed, since `phyai` can edit its own key
+list. Once registered, you can log in any time:
 
 ```bash
 echo '<your public key line>' >> ~/.ssh/authorized_keys      # as phyai
@@ -162,15 +168,19 @@ Only one viewer can be connected.
 
 ## 3. Administer
 
-These need an admin with sudo on the server. `phyai` can't do them.
+Day-to-day use and teammate keys need no admin. Only these tasks need sudo on the server:
 
 - **Create the account:** `sudo bash server/setup_phyai.sh [keys-file]`. It is idempotent: it creates `phyai`,
   adds it to the docker group, creates `/srv/phyai`, and appends keys that aren't already there.
-- **Firewall:** ufw is active. For streaming, allow:
+- **Firewall (once):** ufw is active. For streaming, allow:
   ```bash
   sudo ufw allow 49100/tcp
   sudo ufw allow 47998/udp
   ```
-- **Upgrades:** **do not run `do-release-upgrade`** or change the NVIDIA driver without the team. The CUDA,
+- **Driver and OS:** **do not run `do-release-upgrade`** or change the NVIDIA driver without the team. The CUDA,
   driver and container stack is verified as it is.
-- **Removing a teammate:** delete their line from `/home/phyai/.ssh/authorized_keys`.
+- **Recovery:** restarting or repairing the server or Docker when something breaks.
+- **Backup admin:** keep one backup admin with their own sudo account (to be decided).
+
+**Removing a teammate** needs no admin: anyone who can log in deletes their line from
+`/home/phyai/.ssh/authorized_keys`.
