@@ -410,7 +410,7 @@ Stop any app continuously sending targets before manual commands, since its targ
 The same robot, lab scene and ROS 2 topics also run in Isaac Sim 6.2.0 on the team's RTX 5090 server
 (`ROS_DOMAIN_ID=50`, viewed with the Isaac Sim WebRTC Streaming Client). See
 [sim/piper_isaac_sim](sim/piper_isaac_sim/README.md) for running and verification results, and
-[server/](server/README.md) for access and the one-person-at-a-time lock.
+[server/](server/README.md) for access and the one-person-at-a-time lock ([Korean quick start](server/README.md#팀원-사용법-빠른-시작)).
 
 ## 4. Build the runtime image
 
