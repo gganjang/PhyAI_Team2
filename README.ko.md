@@ -357,6 +357,13 @@ bash scripts/sim_cmd.sh joint1=0.8 joint7=0.03
 
 앱이 목표값을 계속 보내면 수동 명령을 덮어쓰므로 수동 확인 전 제어 앱을 종료합니다.
 
+### 공용 서버의 Isaac Sim
+
+같은 로봇, 실험실 씬, ROS 2 토픽을 팀 RTX 5090 서버의 Isaac Sim 6.2.0에서도 실행할 수 있습니다
+(`ROS_DOMAIN_ID=50`, Isaac Sim WebRTC Streaming Client로 화면 확인). 실행 방법과 검증 결과는
+[sim/piper_isaac_sim](sim/piper_isaac_sim/README.md), 접속 방법과 한 명씩 사용하는 잠금 규칙은
+[server/](server/README.md)를 참고합니다. 팀원 사용법(한국어 빠른 시작): [server/README.md](server/README.md#팀원-사용법-빠른-시작).
+
 ## 4. 런타임 이미지 빌드
 
 **목적:** 앱 하나를 배포용 이미지로 만듭니다.

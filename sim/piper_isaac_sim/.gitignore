@@ -1,0 +1,7 @@
+# Generated assets, caches and results live outside the repo ($PHYAI_ASSETS); never commit them here.
+*.usd
+*.usda
+*.usdc
+*.csv
+results/
+pydeps/
