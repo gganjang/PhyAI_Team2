@@ -302,3 +302,14 @@ def test_restart_resets_runtime_without_saving_scene(editor):
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_clearances_follow_preview_and_revert(editor):
+    from piper_mujoco_sim.measurements import post_clearances
+    before = np.array([r['distance'] for r in post_clearances(editor.model, editor.data)])
+    original = editor.config['post_position']
+    editor.action('preview', {'changes': {'post_position': [original[0] + .1, original[1] - .2]}})
+    after = np.array([r['distance'] for r in post_clearances(editor.model, editor.data)])
+    np.testing.assert_allclose(after - before, [.1, -.1, -.2, .2])
+    editor.action('revert', {})
+    np.testing.assert_allclose([r['distance'] for r in post_clearances(editor.model, editor.data)], before)

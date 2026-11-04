@@ -7,10 +7,12 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import String
 
 from phyai_discovery_ros.scan import ScanNode, NAMES, move_duration, smooth_target
+from phyai_discovery_ros.sim_config import geometry_matches
 
 
 def simulator_only(endpoints):
     return bool(endpoints) and all(e.node_name=='piper_mujoco_sim' for e in endpoints)
+
 
 
 class SimScanNode(ScanNode):
@@ -66,6 +68,13 @@ class SimScanNode(ScanNode):
                 self.actual=None
             self.restart_id=restart
             self.scene=scene;self.scene_received=time.monotonic()
+            expected=self.config.get('survey_geometry')
+            if (expected and scene.get('scan_geometry')
+                    and not geometry_matches(expected,scene['scan_geometry'])):
+                reason=('Scene geometry changed: regenerate the survey with '
+                        'python3 apps/junh/examples/plan_survey.py --write, then relaunch discovery.')
+                if self.fault!=reason:self.fault_stop(reason)
+                return
             if self.planner is not None and scene.get('scan_geometry'):
                 self.planner.sync(scene['scan_geometry'])
         except (ValueError,KeyError,TypeError):self.scene=None

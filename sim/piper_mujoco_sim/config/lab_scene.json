@@ -31,17 +31,17 @@
   },
   "post_radius": 0.04,
   "post_position": [
-    0.1,
-    -0.08
+    -0.0755,
+    0.0655
   ],
-  "robot_yaw_degrees": 90.0,
+  "robot_yaw_degrees": 0.0,
   "overhead_position": [
-    0.1392,
-    0.5083,
-    0.89
+    0.3,
+    0.13,
+    1.06
   ],
   "camera_fovy": 54,
-  "overhead_camera_fovy": 33.0,
+  "overhead_camera_fovy": 45.0,
   "wrist_camera_position": [
     0.02,
     0.02,
@@ -107,10 +107,10 @@
     ]
   ],
   "overhead_quaternion": [
-    0.986155,
-    -0.165756,
-    0.000134,
-    -0.004789
+    -0.7071067811865475,
+    0.0,
+    0.0,
+    0.7071067811865476
   ],
   "home_joints": [
     -0.9599,

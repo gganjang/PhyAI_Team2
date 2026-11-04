@@ -6,15 +6,28 @@
 header{display:flex;align-items:center;gap:12px;padding:14px 20px;flex-wrap:wrap;border-bottom:1px solid #303b4a}
 h1{font-size:18px;margin:0 auto 0 0}button,a{font:inherit;color:inherit;background:#202b38;border:1px solid #435269;border-radius:6px;padding:8px;text-decoration:none;cursor:pointer}
 button:hover,a:hover{background:#35465c}button.active{background:#245cb0}main{padding:16px;text-align:center}img{max-width:100%;max-height:80vh;background:#080a0e;border-radius:8px}p{color:#a9b7c9;font-size:13px}
+#ruler-controls label{display:inline-flex;align-items:center;gap:5px;margin:4px 10px}#ruler-controls legend{font-size:14px;font-weight:600}
 </style></head><body>
 <header><h1>PIPER · Viewer</h1><button class="active" data-view="overview">Overview</button><button data-view="overhead">Overhead camera</button><button data-view="wrist">Arm camera</button><button id="restart">Restart simulation</button><a id="workspace-link" hidden>Workspace</a><a href="/edit">Edit scene</a></header>
-<main><img id="feed" alt="Live simulation"><p id="caption">World axes: X red · Y green · Z blue</p><p id="run-status" role="status" aria-live="polite"></p></main>
+<main><img id="feed" alt="Live simulation"><fieldset id="ruler-controls" style="border:0;margin:8px 0;padding:0"><legend>Overview rulers (cm)</legend>
+<label><input type="checkbox" data-ruler="0" checked> Outer table edges</label>
+<label><input type="checkbox" data-ruler="1"> Plate 1 (−X, −Y)</label>
+<label><input type="checkbox" data-ruler="2"> Plate 2 (+X, −Y)</label>
+<label><input type="checkbox" data-ruler="3"> Plate 3 (−X, +Y)</label>
+<label><input type="checkbox" data-ruler="4"> Plate 4 (+X, +Y)</label>
+<label><input type="checkbox" data-ruler="5"> Gaps between plates</label>
+<p class="muted">Post surface to each selected plate’s edges. Negative = beyond that edge. Gap rulers measure adjacent plate edges.</p></fieldset><p id="caption">World axes: X red · Y green · Z blue</p><p id="run-status" role="status" aria-live="polite"></p></main>
 <script>
 // Release the MJPEG connection while hidden or navigating to the workspace.
 let activeView='overview';
 const feed=document.getElementById('feed');
 function pauseFeed(){feed.removeAttribute('src')}
-function resumeFeed(){if(!document.hidden)feed.src='/stream?view='+activeView}
+function rulerMask(){return [...document.querySelectorAll('[data-ruler]:checked')].reduce((mask,input)=>mask|(1<<Number(input.dataset.ruler)),0)}
+function resumeFeed(){
+ document.getElementById('ruler-controls').hidden=activeView!=='overview';
+ if(!document.hidden)feed.src='/stream?view='+activeView+'&rulers='+rulerMask();
+}
+document.querySelectorAll('[data-ruler]').forEach(input=>input.addEventListener('change',resumeFeed));
 document.addEventListener('visibilitychange',()=>document.hidden?pauseFeed():resumeFeed());
 window.addEventListener('pagehide',pauseFeed);
 window.addEventListener('pageshow',resumeFeed);

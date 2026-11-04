@@ -3,9 +3,9 @@
 <style>
 :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#111820;color:#e6edf3}
 *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0}header{padding:18px 24px;border-bottom:1px solid #324251;display:flex;align-items:center;gap:16px;flex-wrap:wrap}h1{font-size:21px;margin:0 auto 0 0}h2{font-size:17px;margin:0}button,a,select{font:inherit;color:#e6edf3;background:#233747;padding:8px 12px;border:1px solid #526779;border-radius:6px;cursor:pointer;text-decoration:none}
-main{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;padding:18px}main.with-simulator{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{min-width:0}.panel-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;margin-bottom:10px}canvas,#scene-feed{display:block;width:100%;height:clamp(320px,56vh,640px);background:#101820;border:1px solid #324251;border-radius:10px}canvas{touch-action:none}#scene-feed{object-fit:contain;background:#080a0e}
+main{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;padding:18px}main.with-simulator,main.with-cameras{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{min-width:0}.panel-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;margin-bottom:10px}canvas,#scene-feed,#camera-feed{display:block;width:100%;height:clamp(320px,56vh,640px);background:#101820;border:1px solid #324251;border-radius:10px}canvas{touch-action:none}#scene-feed,#camera-feed{object-fit:contain;background:#080a0e}
 .overview-status{padding:0 18px}.overview-status p{margin:12px 0 0}aside{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;background:#1a2632;border-radius:10px;padding:18px;overflow-wrap:anywhere}aside section{min-width:0}aside h2{margin-bottom:14px}details{margin-top:14px}summary{cursor:pointer;color:#a6b8c8}.muted{color:#a6b8c8;font-size:13px;line-height:1.6}.legend{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.row{margin:12px 0}pre{white-space:pre-wrap;font-size:12px}#status{color:#8bd9b1}#error{color:#ffb17b}#scene-status{min-height:1.5em}
-@media(max-width:900px){main.with-simulator{grid-template-columns:1fr}aside{grid-template-columns:1fr}canvas,#scene-feed{height:clamp(280px,48vh,480px)}header{padding:14px 18px}}
+@media(max-width:900px){main.with-simulator,main.with-cameras{grid-template-columns:1fr}aside{grid-template-columns:1fr}canvas,#scene-feed,#camera-feed{height:clamp(280px,48vh,480px)}header{padding:14px 18px}}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;vertical-align:top;padding:7px 3px;border-bottom:1px solid #324251}tbody tr{cursor:pointer}tbody tr:hover{background:#233747}
 </style></head><body>
 <header><h1>Discovered workspace</h1><a id="sim" href="#" hidden>Scene controls</a></header>
@@ -14,6 +14,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;v
 <div class="legend"><span><i class="dot" style="background:#319d68"></i>Observed table</span><span><i class="dot" style="background:#e4a440"></i>Uncertain</span><span><i class="dot" style="background:#526170"></i>Unobserved</span><span><i class="dot" style="background:#9874af"></i>Stale</span><span><i class="dot" style="background:#539fe9"></i>Confirmed block</span><span><i class="dot" style="background:#ff8854"></i>Candidate</span></div>
 <p class="muted">Camera-derived estimates. Drag to pan, scroll to zoom, click a block for details.</p></section>
 <section id="scene-panel" class="panel" aria-label="Live simulator" hidden><div class="panel-heading"><h2>Live 3D viewer</h2><select id="scene-view" aria-label="Simulator camera"><option value="overview">3D overview</option><option value="overhead">Overhead camera</option><option value="wrist">Wrist camera</option></select></div><img id="scene-feed" alt="Live 3D simulation alongside the workspace map"><p id="scene-status" class="muted" role="status">Connecting to simulator…</p></section>
+<section id="camera-panel" class="panel" aria-label="Live cameras" hidden><div class="panel-heading"><h2>Live camera</h2><select id="camera-view" aria-label="Camera to preview"></select></div><img id="camera-feed" alt="Live camera preview" hidden><p id="camera-status" class="muted" role="status">Waiting for camera images…</p><p id="camera-topic" class="muted"></p></section>
 <aside><section><h2>Discovery progress</h2><div id="progress-summary" class="muted">Waiting for discovery…</div><details><summary>Search details and image rates</summary><div id="summary"></div></details></section><section><h2>Final block inventory</h2><div id="block-info" class="muted">Waiting for search to finish.</div><div id="block-list"></div></section><section><h2>Selected candidate</h2><pre id="detail">Click a block fit.</pre></section></aside></main>
 <script>
 const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
@@ -26,6 +27,39 @@ function configureSimulator(port){if(!port)return;const base=new URL(location.hr
 sceneFeed.onload=()=>{sceneStatus.textContent='Live simulation · world axes: X red, Y green, Z blue'};
 sceneFeed.onerror=()=>{sceneStatus.textContent='Simulator stream unavailable. Reconnecting…';pauseScene()};
 document.getElementById('scene-view').onchange=resumeScene;
+
+const cameraFeed=document.getElementById('camera-feed'),cameraView=document.getElementById('camera-view'),cameraStatus=document.getElementById('camera-status');
+let cameraTimer,cameraRequest=null,cameraGeneration=0;
+function pauseCamera(){clearTimeout(cameraTimer);cameraGeneration++;if(cameraRequest)cameraRequest.abort();cameraRequest=null}
+async function refreshCamera(){
+ if(document.hidden||!cameraView.value||cameraRequest)return;
+ clearTimeout(cameraTimer);cameraTimer=null;
+ const generation=cameraGeneration,name=cameraView.value;
+ const controller=new AbortController();cameraRequest=controller;
+ const timeout=setTimeout(()=>controller.abort(),3000);
+ try{
+  const response=await fetch('/camera/'+encodeURIComponent(name)+'.jpg',{cache:'no-store',signal:controller.signal});
+  if(!response.ok)throw Error(response.status===503?'Waiting for fresh camera images…':'Camera preview unavailable.');
+  const blob=await response.blob();if(generation!==cameraGeneration)return;
+  const previous=cameraFeed.src;cameraFeed.src=URL.createObjectURL(blob);cameraFeed.hidden=false;
+  if(previous.startsWith('blob:'))URL.revokeObjectURL(previous);
+  cameraStatus.textContent='Live '+name+' camera · preview up to 5 fps';
+ }catch(error){if(generation!==cameraGeneration)return;cameraFeed.hidden=true;cameraStatus.textContent=error.name==='AbortError'?'Camera preview timed out.':error.message;}
+ finally{clearTimeout(timeout);if(generation===cameraGeneration){cameraRequest=null;cameraTimer=setTimeout(refreshCamera,200);}}
+}
+function configureCameras(cameras){
+ const names=Object.keys(cameras||{});if(!names.length)return;
+ const old=cameraView.value;
+ if([...cameraView.options].map(o=>o.value).join(',')!==names.join(',')){
+  cameraView.replaceChildren(...names.map(name=>{const option=document.createElement('option');option.value=name;option.textContent=name==='wrist'?'Wrist camera':'Overhead camera';return option}));
+  cameraView.value=names.includes(old)?old:(names.includes('wrist')?'wrist':names[0]);
+ }
+ document.getElementById('camera-panel').hidden=false;
+ document.getElementById('workspace-layout').classList.add('with-cameras');
+ document.getElementById('camera-topic').textContent='ROS topic: '+cameras[cameraView.value].topic;
+ if(!cameraRequest&&!cameraTimer)refreshCamera();
+}
+cameraView.onchange=()=>{pauseCamera();cameraTimer=null;cameraFeed.hidden=true;document.getElementById('camera-topic').textContent='';refreshCamera()};
 
 
 function fit(){if(!data)return;const w=data.workspace,s=w.coverage.scope||w.table?.observed_surface_bounds||[-.8,.8,-.5,.5];center=[(s[0]+s[1])/2,(s[2]+s[3])/2];scale=Math.min(canvas.clientWidth/(s[1]-s[0]+.2),canvas.clientHeight/(s[3]-s[2]+.2));draw()}
@@ -76,8 +110,8 @@ canvas.onpointerup=e=>{if(drag&&Math.hypot(e.clientX-drag[0],e.clientY-drag[1])<
 canvas.onwheel=e=>{e.preventDefault();scale=Math.max(20,Math.min(2500,scale*Math.exp(-e.deltaY*.001)));draw()};
 document.getElementById('fit').onclick=fit;window.onresize=draw;
 let polling=false,pollTimer;
-async function poll(){if(document.hidden||polling)return;clearTimeout(pollTimer);polling=true;try{const response=await fetch('/api/workspace');if(!response.ok)throw Error('Map server unavailable');const packet=await response.json();configureSimulator(packet.simulator_port);if(packet.snapshot){data=packet.snapshot;age=packet.publisher_age;packetReceived=performance.now();if(fittedSession!==data.workspace.session_id){fittedSession=data.workspace.session_id;selected=null;fit()}draw()}}catch(error){document.getElementById('status').textContent='Workspace unavailable: '+error.message}finally{polling=false;if(!document.hidden)pollTimer=setTimeout(poll,1000)}}
-document.addEventListener('visibilitychange',()=>{clearTimeout(pollTimer);if(document.hidden)pauseScene();else{resumeScene();poll()}});
-window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);pauseScene()});
-window.addEventListener('pageshow',()=>{resumeScene();poll()});poll();
+async function poll(){if(document.hidden||polling)return;clearTimeout(pollTimer);polling=true;try{const response=await fetch('/api/workspace');if(!response.ok)throw Error('Map server unavailable');const packet=await response.json();configureSimulator(packet.simulator_port);configureCameras(packet.cameras);if(packet.snapshot){data=packet.snapshot;age=packet.publisher_age;packetReceived=performance.now();if(fittedSession!==data.workspace.session_id){fittedSession=data.workspace.session_id;selected=null;fit()}draw()}}catch(error){document.getElementById('status').textContent='Workspace unavailable: '+error.message}finally{polling=false;if(!document.hidden)pollTimer=setTimeout(poll,1000)}}
+document.addEventListener('visibilitychange',()=>{clearTimeout(pollTimer);if(document.hidden){pauseScene();pauseCamera();cameraTimer=null;}else{resumeScene();refreshCamera();poll()}});
+window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);pauseScene();pauseCamera();cameraTimer=null});
+window.addEventListener('pageshow',()=>{resumeScene();refreshCamera();poll()});poll();
 </script></body></html>

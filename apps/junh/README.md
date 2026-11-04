@@ -28,6 +28,23 @@ rates are collapsed by default. The layout stacks on smaller screens, and hidden
 tabs release their video stream. Scattering starts a new scene and inventory session. Block IDs
 are association IDs; no stacking order is assigned.
 
+After editing the scene, **Save scene**, then regenerate the fixed survey against
+that geometry before relaunching (with the ROS workspace sourced):
+
+```bash
+python3 apps/junh/examples/plan_survey.py --write
+bash apps/junh/run_sim.sh --no-build
+```
+
+The generator checks possible block-sized top faces across all four plates and a
+dense ring around the post, including plate 3's far-left band. It checks camera
+framing, fixture/robot occlusion, joint limits and interpolated path clearance;
+it does not use actual block positions or count. Without `--write`, it reports a
+proposed survey without modifying config. Recorded post/camera geometry is checked
+against the live scene: incompatible edits stop scanning with a regeneration
+message instead of silently using old poses. Coverage is a geometric sample check,
+not a guarantee that SAM2 will detect or confirm every visible block.
+
 `config/mujoco.json` controls the scan. The wrist camera is the primary sensor. The gripper stays open during survey and
 adaptive inspection (`sim_scan.gripper_position: 0.035`, 70 mm total opening).
 By default an initial overhead RGB capture seeds coarse candidates without arm
@@ -37,7 +54,7 @@ are excluded from the wrist fit history. If no usable overhead capture arrives
 within 5 seconds, the scan continues with the wrist survey without overhead
 retries. Accepted-frame processing retains the normal 30-second budget.
 Set `use_overhead: false` to start directly with the wrist sweep.
-The wrist then takes thirteen survey views around the table, including inward views
+The wrist then takes the configured survey views around the table, including inward views
 beside the PIPER mounting post and views of the lower-left table area tuned for
 the saved 90° base heading, to collect candidate locations. These views also
 skip iterative pose fitting and do not confirm IDs.
@@ -109,7 +126,9 @@ plus the wrist sweep. This catches local blind spots that a table-wide coverage
 threshold can hide. It is a sampled installation check, not an exhaustive
 visibility guarantee.
 
-For the real-model RGB-only rendered regression, source `apps/junh/sam2_env.sh`,
+For the real-model RGB-only rendered regression, prepare the shared runtime with
+`bash scripts/setup_discovery_sam2.sh --config apps/junh/config/mujoco.json`, then
+source `.discovery-sam2/env.sh`,
 set `PHYAI_DISCOVERY_TEST_SAM2_CHECKPOINT` to the checkpoint, and run
 `MUJOCO_GL=egl python3 -m pytest -q apps/junh/test/test_rgb_survey.py` with the same
 source paths. This requires the local PIPER MuJoCo model and tests saved and near-post

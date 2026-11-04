@@ -135,7 +135,10 @@ def test_discovery_open_gripper_survives_geometry_sync_and_adaptive_planning(pla
 def test_near_post_rgb_view_clears_the_projected_robot_mask(planner):
     config = json.loads((ROOT/'apps/junh/config/mujoco.json').read_text())
     current = config['sim_scan']['targets'][config['viewpoints'][-1]]
-    item = target(-.02, .04)
+    # Place the test target relative to the current mounting post, rather than
+    # at a stale world coordinate that an edited base can physically cover.
+    post = planner.model.geom('mount_post').pos
+    item = target(float(post[0] - .16), float(post[1]))
     opened = InspectionPlanner(planner.model,
         list(config['sim_scan']['targets'].values()), None, gripper=.035)
     ray_only = opened.choose([item], current, 'ray_only')

@@ -1,6 +1,11 @@
 """Live workspace viewer with a completion-triggered GetBlockInfo client."""
 import json
 import time
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Image
 
 import rclpy
 from rclpy.node import Node
@@ -21,12 +26,30 @@ class ViewerNode(Node):
         self.declare_parameter('markers_topic', f'{interface_prefix}/workspace_markers')
         self.declare_parameter('stale_seconds',10.)
         self.declare_parameter('http_port',0)
+        self.declare_parameter('http_host','0.0.0.0')
         self.declare_parameter('simulator_port',0)
+        self.declare_parameter('config_path','')
+        self.camera_preview_received={}
         self.web=None
         port=int(self.get_parameter('http_port').value)
         if port:
             from phyai_discovery.viewer.web import WorkspaceWeb
-            self.web=WorkspaceWeb(port,int(self.get_parameter('simulator_port').value))
+            config_path=(self.get_parameter('config_path').value or
+                         get_package_share_directory('phyai_discovery_ros')+'/config/discovery.json')
+            config=json.loads(Path(config_path).read_text())
+            cameras={name: cfg.get('stream_rgb_topic') or cfg.get('rgb_topic')
+                     for name,cfg in config.get('cameras',{}).items()
+                     if name in ('overhead','wrist') and (cfg.get('stream_rgb_topic') or cfg.get('rgb_topic'))}
+            simulator_port=int(self.get_parameter('simulator_port').value)
+            # The simulator already supplies camera video, including when this
+            # page is served through its /workspace proxy.
+            if simulator_port:cameras={}
+            self.web=WorkspaceWeb(port,simulator_port, cameras=cameras,
+                                  host=self.get_parameter('http_host').value)
+            for name,topic in cameras.items():
+                self.create_subscription(Image,topic,
+                    lambda msg,name=name:self.on_camera(name,msg),
+                    QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT))
             self.get_logger().info(f'App workspace map: http://localhost:{port}')
         self.latest = None
         self.received = None
@@ -39,6 +62,19 @@ class ViewerNode(Node):
         self.create_subscription(String,self.get_parameter('workspace_topic').value,self.on_workspace,1)
         self.pub = self.create_publisher(MarkerArray,self.get_parameter('markers_topic').value,1)
         self.create_timer(.5,self.tick)
+
+    def on_camera(self,name,msg):
+        now=time.monotonic()
+        if now-self.camera_preview_received.get(name, float('-inf'))<.2:return
+        # Limit JPEG work to five previews per second, independent of detection.
+        self.camera_preview_received[name]=now
+        from .camera_preview import camera_jpeg
+        try:
+            jpeg=camera_jpeg(msg)
+        except ValueError as error:
+            self.get_logger().warning(str(error), throttle_duration_sec=5.)
+            return
+        self.web.update_camera(name,jpeg)
 
     def on_workspace(self,msg):
         try:

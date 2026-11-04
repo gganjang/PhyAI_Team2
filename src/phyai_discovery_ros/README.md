@@ -7,21 +7,34 @@ are not required:
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-up-to phyai_discovery_ros
 source install/setup.bash
-cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json" /tmp/team-discovery.json
-# Edit the copied installation settings described below before launching.
 # Run from the repository root to provision/load SAM2 automatically:
-bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
-  with_viewer:=true viewer_port:=23518 auto_scan:=false
+bash scripts/run_discovery.sh
 ```
+
+**`--config` is optional.** This command uses the included
+`src/phyai_discovery_ros/config/discovery.json`; no separate JSON file is required.
+Installation settings are configured once in that default. Pass
+`--config /path/other.json` only to select an alternative, such as an installation
+copy of `discovery_rgb.json` for the RGB backend.
+The current default has no scan targets: enabling `auto_scan:=true` currently
+requires a config with `scan.targets` and `scan.joint_limits`.
+
+`run_discovery.sh` enables the viewer by default at **http://localhost:23518**
+and prints its URL. It listens on `0.0.0.0` by default, so external clients can
+open `http://<host-ip>:23518`. Pass `-- viewer_host:=127.0.0.1` to restrict access
+to this machine, `-- with_viewer:=false` to disable it, or
+`-- viewer_port:=PORT` to use another port. Automatic arm scanning remains off
+unless explicitly enabled with `auto_scan:=true`.
 
 For a package-only handoff, share `src/phyai_discovery`,
 `src/phyai_discovery_interfaces`, and `src/phyai_discovery_ros`. The repository
 shell launchers are conveniences; the installed packages also provide SAM2 setup:
 
 ```bash
-# After building/sourcing those packages and editing /tmp/team-discovery.json:
+# Package-only setup: select the installed RGB template (adjust installation settings first).
 python3 -m phyai_discovery.setup_sam2 \
-  --runtime-dir "$HOME/.cache/phyai-discovery" --config /tmp/team-discovery.json
+  --runtime-dir "$HOME/.cache/phyai-discovery" \
+  --config "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json"
 source "$HOME/.cache/phyai-discovery/env.sh"
 ros2 launch phyai_discovery_ros discovery.launch.py \
   with_viewer:=true viewer_port:=23518 auto_scan:=false
@@ -32,9 +45,16 @@ can be reused with `--venv` and `--checkpoint`. Viewer-only consumers need neith
 SAM2 nor robot motion: use the standalone viewer command below.
 
 Open **http://localhost:23518**. The map, candidate count, uncertainty and final
-inventory work on hardware without a simulator. If needed, forward this loopback
-HTTP port over SSH or through your IDE. Set `simulator_port:=23517` only when a
-compatible simulator is running; its live video appears beside the map. Hardware
+inventory work on hardware without a simulator. The **Live camera** panel previews
+wrist and overhead RGB images from the same installation configuration, with no
+simulator required. Select a camera beside the map. The viewer uses each camera's
+`stream_rgb_topic` when present, otherwise `rgb_topic`. Preview images are limited
+to 5 fps and 960 × 720 pixels; discovery continues using its configured input.
+A missing camera or one with no new preview for two seconds displays a waiting
+message rather than a frozen live image. Raw `rgb8`, `bgr8`, `rgba8`, `bgra8`, and
+`mono8` images are supported. Camera drivers must already be publishing.
+You can also forward the HTTP port over SSH or through your IDE. Set `simulator_port:=23517` only when a
+compatible simulator is running; its existing live video panel is used instead. Hardware
 geometry can also be viewed in RViz through `discovery/workspace_markers`; the
 browser does not synthesize a hardware robot rendering. In RViz, set Fixed Frame
 to your configured `map_frame` and add a MarkerArray display for that topic.
@@ -92,8 +112,8 @@ not a complete-scene or grasp-readiness guarantee. Reset with
 `/discovery/restart_scan` when the scene/calibration changes. The app may add
 inspection views through `/discovery/add_view`; its robot adapter plans the
 physical camera pose requested by discovery. The generic shared scan controller executes configured fixed poses with
-`auto_scan:=true`. For candidate-directed motion, subclass
-`phyai_discovery_ros.scan.ScanNode` and implement `plan_view(request, current)` to
+`auto_scan:=true`. For candidate-directed motion, select the optional configured geometry planner
+below, or subclass `phyai_discovery_ros.scan.ScanNode` and implement `plan_view(request, current)` to
 return feasible joints or `None`. The shared controller handles caching,
 trajectory/arrival feedback and `ReportView`; it never selects another candidate
 or owns the per-candidate view budget. A candidate request without a robot planner
@@ -168,6 +188,95 @@ calibration error bounds, and hardware scan trajectories are not yet validated.
 Supported scenes remain static blocks of known cuboid dimensions on a
 near-horizontal table, with `overhead` and `wrist` camera roles.
 
+## Test the shared interface against standalone MuJoCo
+
+Run the simulator as a separate host, then run the same discovery launcher used
+with hardware. This uses the measured `lab_scene.json` and the generic
+`phyai_discovery_ros` scan controller. It does not launch Junh, use `SimScanNode`,
+read `/sim/scene`, or request simulator-only capture images or robot masks.
+
+Build `phyai_discovery_ros` and `piper_mujoco_sim` in your ROS workspace first:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-up-to phyai_discovery_ros piper_mujoco_sim
+source install/setup.bash
+```
+
+The two scripts source ROS and the workspace automatically. They default to
+`ROS_DOMAIN_ID=142`; set the same alternative domain in both terminals if needed.
+Use a domain reserved for this simulation test, separate from the physical robot.
+Set `PHYAI_WS=/path/to/workspace` if the repository is outside its usual `src/`
+location. These scripts launch existing builds; they do not rebuild packages.
+
+Terminal 1 — independent simulated host:
+
+```bash
+bash scripts/run_sim_host.sh
+```
+
+Open **http://localhost:23517** for the arm and scene rulers. Blocks scatter randomly
+by default; use `bash scripts/run_sim_host.sh scatter_on_start:=false` for saved
+positions, or `scatter_seed:=7` for a repeatable layout. Keep physics running;
+scene editing pauses motion until you resume it.
+
+Terminal 2 — shared discovery and commands:
+
+```bash
+bash scripts/run_discovery_sim.sh
+```
+
+Open **http://localhost:23518** for the workspace and live camera previews.
+SAM2 is provisioned on first use. To reuse an existing environment and checkpoint,
+pass `--venv /path/to/venv --checkpoint /path/to/sam2.1_hiera_tiny.pt` to
+`run_discovery_sim.sh` before `--`. ROS launch options go after `--`, for example
+`bash scripts/run_discovery_sim.sh -- viewer_port:=24518 auto_scan:=false`.
+Simulator options are passed directly, for example
+`bash scripts/run_sim_host.sh http_port:=24517 camera_rate:=30.0`.
+Both scripts support `--help`.
+
+The wrapper synchronizes survey labels, joint poses, timing and table
+scope from `apps/junh/config/mujoco.json` on every launch (currently 17 poses),
+reads joint limits from the current robot model, and checks that saved post/camera
+geometry still matches the scene. Save
+scene edits and regenerate with `python3 apps/junh/examples/plan_survey.py --write`
+when instructed. The synchronized input is stored in the SAM2 runtime cache;
+the checked-in template is not overwritten. Explicit `--config` selects a custom
+configuration instead of automatic synchronization.
+
+The simulation configuration first captures overhead input and runs the survey,
+then inspects unresolved measured candidates until they meet the configured
+criteria or exhaust their view budgets. It uses the shared controller with the
+optional `mujoco_geometry` view planner and public continuous camera topics.
+It does not subscribe to simulator ground truth or use block poses in planning.
+It exercises these same interfaces used by the real host:
+
+| Interface | Direction |
+|---|---|
+| `/joint_ctrl_single` (`sensor_msgs/JointState`) | Discovery scan → simulated host |
+| `/joint_states` (`sensor_msgs/JointState`) | Simulated host → discovery scan |
+| `/wrist/color/image_rect_raw`, `/overhead/color/image_rect_raw` | Host RGB images → discovery and viewer |
+| `/wrist/color/camera_info`, `/overhead/color/camera_info` | Host camera calibration → discovery |
+| `/tf` | Host camera poses → discovery |
+
+A successful interface check shows `Moving to sweep_1`, subsequent survey views, corresponding arm
+motion and joint feedback, camera images in the viewer, verified arrivals and
+captures, focused `Inspection refine_*` views, then `Search completed.` without
+scan faults. A scan can still finish with a **partial** inventory if geometry,
+occlusion, or view budgets prevent confirmation. Finishing the survey alone does
+not confirm all blocks. Restart it while leaving MuJoCo running:
+
+```bash
+ROS_DOMAIN_ID=142 ros2 service call /discovery/restart_scan std_srvs/srv/Trigger '{}'
+```
+
+When moving to the control PC, replace the simulator with the hardware bridge,
+camera drivers, and measured TF, and select a hardware installation configuration.
+The poses and calibration in `mujoco_interface.json` belong to this simulated
+scene and are not validated physical trajectories. Candidate-directed inspection
+requires a hardware `plan_view` adapter or a matching configured geometry planner;
+the simulation model is not automatically valid for the physical installation.
+
 ## Build and launch
 
 Add `<exec_depend>phyai_discovery_ros</exec_depend>` to your app's `package.xml`.
@@ -177,10 +286,8 @@ From your colcon workspace:
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-up-to phyai_discovery_ros
 source install/setup.bash
-cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery.json" /tmp/hardware.json
-# Edit /tmp/hardware.json for your installation before launching.
-# Then, from the repository root (SAM2 is provisioned automatically):
-bash scripts/run_discovery.sh --config /tmp/hardware.json -- auto_scan:=false
+# From the repository root; the included default config is selected automatically:
+bash scripts/run_discovery.sh
 ```
 
 ### Standard SAM2 workflow (developers and AI agents)
@@ -189,8 +296,10 @@ Use the shared launcher for the advertised SAM2-assisted discovery backend:
 
 ```bash
 # After building and sourcing the ROS workspace, from the repository root:
-bash scripts/run_discovery.sh --config /absolute/path/installation.json -- auto_scan:=false
-# auto_scan:=true starts the generic fixed-pose controller, not a custom focus planner.
+bash scripts/run_discovery.sh
+# Optional config override:
+# bash scripts/run_discovery.sh --config /absolute/path/installation.json
+# auto_scan:=true needs scan targets; it starts the generic fixed-pose controller.
 ```
 
 The launcher automatically creates/reuses `.discovery-sam2/`, installs pinned
@@ -202,7 +311,7 @@ calibrated RGB only; the depth backend requires aligned RGB/depth when SAM2 is u
 launches reuse the dependencies and checkpoint. Setup never silently falls back
 to depth-only segmentation.
 
-`--config` is a complete installation JSON: its camera, scan and table settings are
+The optional `--config` override selects a complete installation JSON: its camera, scan and table settings are
 preserved, and relative mask/intrinsics-file paths are made absolute. Setup changes
 only the generated copy's segmentation settings. Keep setup options before `--`
 and ROS launch arguments after it. Without `--config`, the shared observation-only
@@ -275,10 +384,10 @@ environment before executing their command. The default command is app-specific;
 the override above starts only shared discovery and its viewer.
 
 Use the host stack's ROS domain. The viewer is at `http://localhost:23518` when
-using host networking; remote users can forward that loopback port over SSH.
+using host networking; remote users can open `http://<host-ip>:23518` or forward the port over SSH.
 Start observation-only. Candidate-directed motion requires the teammate's
-robot-adapter process; `auto_scan:=true` starts only the generic fixed-pose
-controller and needs a validated `scan` configuration. The image contains pinned SAM2 dependencies and weights at
+robot-adapter process; `auto_scan:=true` starts the shared controller (fixed poses by default, or
+focused views with a configured planner) and needs a validated `scan` configuration. The image contains pinned SAM2 dependencies and weights at
 `/opt/phyai-sam2`; its entry point exports the checkpoint and dependency paths.
 Your mounted installation JSON should set `segmentation.backend: sam2` and can
 omit `checkpoint` to use that exported path. Run the container with `--gpus all`
@@ -393,8 +502,9 @@ ros2 launch phyai_discovery_ros discovery.launch.py \
   config_path:=/absolute/path/installation.json auto_scan:=true
 ```
 
-`auto_scan` starts the generic fixed-pose controller and defaults to false.
-For candidate-directed scanning, launch your robot-adapter subclass separately
+`auto_scan` starts the shared scan controller and defaults to false. Without a
+configured view planner it executes fixed poses only.
+For candidate-directed scanning, configure `view_planner`, or launch your robot-adapter subclass separately
 and leave `auto_scan:=false` to avoid starting a second controller. When enabled,
 the same configuration must include a `scan` section. The installed
 `config/piper_scan.example.json` contains the existing 11 survey poses, eight
@@ -402,7 +512,8 @@ reserve poses and PIPER joint limits, with slower motion settings and a closed
 gripper. It is an installation example copied from the simulated setup; verify
 the physical setup and paths before using it on hardware. Set calibrated camera
 inputs, masks and table settings in that file as needed. Joint limits bound
-individual joints; the shared controller does not perform collision checking.
+individual joints; fixed-pose mode does not perform collision checking. The optional
+geometry planner checks its configured robot/fixture geometry when planning focused views.
 
 The bridge contract assumed here matches MuJoCo:
 
@@ -420,12 +531,15 @@ acceleration, waits for measured arrival (arm error <0.025 rad and gripper error
 stationarity. It waits for a command subscriber and refuses competing command
 publishers; this is a ROS graph check, not an atomic bridge control lease.
 
-The shared controller needs no `/sim/scene` or MuJoCo installation. With
+The shared controller never requires `/sim/scene`; its fixed-pose mode needs no
+MuJoCo installation. The optional geometry-planning backend requires MuJoCo and
+the `piper_mujoco_sim` model helpers. With
 candidate-focus policy disabled, it uses fixed survey/reserve targets from the
 installation configuration. With the policy enabled, survey targets are fixed
 and focused request slots are planned by your `ScanNode.plan_view(request, current)`
 implementation. The generic executable does not include hardware IK or a collision
-planner; enable candidate-directed motion through your robot-adapter subclass.
+planner by default; enable candidate-directed motion through `view_planner` or
+your robot-adapter subclass.
 Junh supplies the MuJoCo implementation using the same execution logic with
 simulated time and pause/restart guards. Simulator block truth is never a
 substitute for camera observations.
@@ -439,6 +553,29 @@ handling remains authoritative. Stale feedback/progress, command conflicts and
 arrival timeout also latch a fault. Restart discovery to establish a new session
 before resuming. On normal completion the controller sends its final hold and
 stops publishing commands, leaving the inventory available to consumers.
+
+### Optional configured geometry planner
+
+`run_discovery_sim.sh` now selects `view_planner.backend: mujoco_geometry` and
+copies the survey's candidate-focus policy and inspection budgets. This backend
+uses `robot_path`, `scene_config`, and the recorded `survey_geometry` to build a
+known installation model. Free-body objects are disabled in that planning model;
+only Discovery's measured focus requests supply candidate positions. It checks
+visibility, conservative robot-mask clearance, novelty and motion-path clearance.
+The synchronized configuration also enables robot exclusion projected from the
+known model using public, capture-matched `/joint_states` (within 50 ms), camera
+intrinsics and capture-time TF. This prevents the base/arm from seeding false
+block hypotheses. No simulator mask topic or ground-truth block input is used.
+There is no `/sim/scene` or simulator camera request subscription/publication.
+Camera acquisition continues through public RGB/CameraInfo/TF interfaces.
+`run_sim_host.sh` renders those RGB streams at 1280×960 by default, matching the
+integrated app's fitting observations. Override `camera_width:=640
+camera_height:=480` to exercise lower-resolution inputs; small/distant silhouettes
+may then exceed pose-uncertainty bounds. Confirmation thresholds remain unchanged.
+
+The hardware launcher does not select this backend automatically. Use a measured,
+validated hardware installation model or provide your own `ScanNode.plan_view`
+adapter before enabling candidate-directed physical motion.
 
 ## App interface
 

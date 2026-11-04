@@ -78,7 +78,14 @@ if [ ! -f "$SIM_WS/install/setup.bash" ]; then
     exit 1
 fi
 source "$SIM_WS/install/setup.bash"
-source "$APP_DIR/sam2_env.sh"
+SAM2_RUNTIME="${PHYAI_SAM2_RUNTIME_DIR:-$REPO_ROOT/.discovery-sam2}"
+SAM2_SETUP_ARGS=(--config "$APP_DIR/config/mujoco.json")
+# Reuse the existing local model cache after consolidating the setup scripts.
+if [[ -x "$APP_DIR/.venv-sam2/bin/python" && -f "$APP_DIR/.models/sam2.1_hiera_tiny.pt" ]]; then
+    SAM2_SETUP_ARGS+=(--venv "$APP_DIR/.venv-sam2" --checkpoint "$APP_DIR/.models/sam2.1_hiera_tiny.pt")
+fi
+bash "$REPO_ROOT/scripts/setup_discovery_sam2.sh" "${SAM2_SETUP_ARGS[@]}"
+source "$SAM2_RUNTIME/env.sh"
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 echo "MuJoCo scene: $SCENE_CONFIG"

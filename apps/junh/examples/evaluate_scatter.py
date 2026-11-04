@@ -117,7 +117,7 @@ def evaluate(snapshot, poses, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--seed', type=int, help='Seed used by scatter_blocks.py')
+    source.add_argument('--seed', type=int, help='Seed used by the simulator scattering API')
     source.add_argument('--aligned', action='store_true', help='Evaluate the reset layout')
     parser.add_argument('--table', default='all', choices=('all', '0_0', '0_1', '1_0', '1_1'))
     parser.add_argument('--snapshot', type=Path, help='Saved JSON/JSONL discovery snapshot')

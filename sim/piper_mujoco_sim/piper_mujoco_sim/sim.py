@@ -15,8 +15,9 @@ from .scatter import BlockScatter
 from .robot_mask import robot_mask
 from .scene import build_scene, scene_snapshot, reset_scene  # noqa: E402
 from .gizmo import draw_axis_gizmo  # noqa: E402
+from .measurements import ruler_groups, draw_ruler_groups  # noqa: E402
 from .editor import SceneEditor  # noqa: E402
-from .web import FrameHub, make_handler  # noqa: E402
+from .web import FrameHub, make_handler, overview_hub  # noqa: E402
 
 import mujoco  # noqa: E402
 import rclpy  # noqa: E402
@@ -115,7 +116,8 @@ class PiperMujocoSim(Node):
             raise ValueError('publish_rate must be finite and positive.')
         self.publish_period = 1.0 / param('publish_rate')
 
-        self.hubs = {name: FrameHub() for name in ('overview', 'overhead', 'wrist')}
+        self.hubs = {name: FrameHub() for name in ('overhead', 'wrist')}
+        self.hubs.update({overview_hub(mask): FrameHub() for mask in range(64)})
         self.view_period = 1.0 / param('view_fps')
         self.view_size = (param('view_width'), param('view_height'))
         self.camera_publishers = {}
@@ -361,18 +363,28 @@ class PiperMujocoSim(Node):
                 view_due = started >= next_view
                 if view_due:
                     next_view = started+self.view_period
-                for name,hub in (self.hubs.items() if view_due else ()):
-                    if hub.clients<=0:continue
+                for name in (('overview', 'overhead', 'wrist') if view_due else ()):
+                    targets = ([(mask, self.hubs[overview_hub(mask)]) for mask in range(64)]
+                               if name == 'overview' else [(0, self.hubs[name])])
+                    targets = [(mask, hub) for mask, hub in targets if hub.clients > 0]
+                    if not targets:continue
                     selected=camera if name=='overview' else name
                     if name!='overview' and mujoco.mj_name2id(self.model,mujoco.mjtObj.mjOBJ_CAMERA,name)<0:
                         selected=camera
-                    with self.lock:renderer.update_scene(self.data,selected)
+                    with self.lock:
+                        renderer.update_scene(self.data,selected)
+                        groups = (ruler_groups(self.model, self.data)
+                                  if name == 'overview' and self.editor else None)
                     frame=Image.fromarray(renderer.render())
                     if name in ('overview','overhead'):
                         axes='XY' if name=='overhead' and selected==name else 'XYZ'
                         draw_axis_gizmo(frame,renderer.scene,axes)
-                    buf=io.BytesIO();frame.save(buf,format='JPEG',quality=80)
-                    hub.publish(buf.getvalue())
+                    for mask, hub in targets:
+                        annotated = frame.copy()
+                        if groups is not None:
+                            draw_ruler_groups(annotated,renderer.scene,groups,mask)
+                        buf=io.BytesIO();annotated.save(buf,format='JPEG',quality=80)
+                        hub.publish(buf.getvalue())
                 if self.camera_publishers and sensor is not None and time.monotonic()>=next_camera:
                     next_camera=time.monotonic()+self.camera_period
                     for name,pubs in self.camera_publishers.items():

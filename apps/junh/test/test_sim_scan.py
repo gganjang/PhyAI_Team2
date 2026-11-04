@@ -175,3 +175,72 @@ def test_simulator_only_plans_the_candidate_selected_by_shared_discovery():
         assert not hasattr(node,'candidate_view_counts')
     finally:
         node.destroy_node();rclpy.try_shutdown()
+
+
+def test_slow_inspection_waits_for_fresh_scene_before_starting_motion(monkeypatch):
+    """A plan taking >1 s must not start, then fault on queued scene input."""
+    rclpy.init()
+    node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
+    clock=SimpleNamespace(now=100.)
+    try:
+        monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock.now))
+        monkeypatch.setattr(shared_module,'time',SimpleNamespace(monotonic=lambda:clock.now))
+        node.get_subscriptions_info_by_topic=lambda topic:[SimpleNamespace(node_name='piper_mujoco_sim')]
+        node.get_publishers_info_by_topic=lambda topic:[SimpleNamespace(node_name=node.get_name(),node_namespace=node.get_namespace())]
+        node.scene={'scan_geometry':{'available':True},'paused':False,'simulation_time':1.,
+                    'robot':{'joints':[{'limits':[-3.,3.]} for _ in range(6)]}}
+        node.actual=list(node.targets['refine_1'])
+        node.scene_received=node.feedback_received=node.discovery_received=clock.now
+        node.session='test'
+        node.discovery={'view_request':view_request(),
+                        'search':{'state':'wait_for_wrist_view','target':'refine_1','viewpoint_index':6,'rejected':0}}
+        planned=[]
+        def choose(*args):
+            planned.append(1)
+            clock.now+=2.  # Subscription callbacks cannot run during planning.
+            return {'joints':node.targets['refine_1'],'focus':'weak','position':[.1,.2,.01]}
+        node.planner=SimpleNamespace(choose=choose)
+        commands=[]
+        node.command=lambda target:commands.append(target)
+        node.tick()
+        assert node.active is None and node.fault is None
+        assert not commands
+        assert node.wait_reason=='Waiting for fresh simulator scene.'
+        node.tick()  # Still stale: do not fault or repeat the expensive plan.
+        assert node.active is None and node.fault is None and planned==[1]
+        node.scene_received=node.feedback_received=node.discovery_received=clock.now
+        node.scene['simulation_time']=3.
+        node.tick()
+        assert node.active=='refine_1' and node.fault is None and commands
+        assert planned==[1]
+        # Actual loss of scene updates during motion must still stop the scan.
+        clock.now+=1.1
+        node.tick()
+        assert node.fault=='Simulator scene became stale.'
+        assert node.active is None
+    finally:
+        node.destroy_node();rclpy.try_shutdown()
+
+
+@pytest.mark.parametrize('part', ['post', 'wrist_fov', 'overhead'])
+def test_scene_edit_rejects_stale_survey_poses(part):
+    import copy
+    from std_msgs.msg import String
+    rclpy.init()
+    node=SimScanNode(parameter_overrides=[Parameter('config_path',value=str(Path(__file__).parents[1]/'config/mujoco.json'))])
+    try:
+        geometry=copy.deepcopy(node.config['survey_geometry'])
+        def send():node.on_scene(String(data=json.dumps({'restart_id':0,'scan_geometry':geometry})))
+        send()
+        assert node.fault is None
+        geometry['post_position'][0]+=1e-10
+        send()
+        assert node.fault is None  # JSON/normalization roundoff is not an edit.
+        if part=='post':geometry['bodies']['base_link']['position'][0]+=.01
+        elif part=='wrist_fov':geometry['cameras']['wrist']['fovy']+=1
+        else:geometry['bodies']['overhead_mount']['position'][2]+=.01
+        send()
+        assert node.fault.startswith('Scene geometry changed: regenerate the survey')
+        assert node.active is None
+    finally:
+        node.destroy_node();rclpy.try_shutdown()
