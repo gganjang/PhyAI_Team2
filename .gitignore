@@ -10,3 +10,6 @@ log/
 # Shared discovery SAM2 environment, generated config, and downloaded weights
 .discovery-sam2/
 apps/junh/.sam2-runtime/
+
+# Local ROS workspace for discovery checkouts outside a colcon src directory
+.discovery-ros/

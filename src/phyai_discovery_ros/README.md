@@ -11,6 +11,11 @@ source install/setup.bash
 bash scripts/run_discovery.sh
 ```
 
+`run_discovery.sh` sources ROS and the workspace automatically. Missing discovery
+packages are built before SAM2 setup; `--build` forces a rebuild after pulling.
+Use `PHYAI_WS` to select an existing workspace. Checkouts outside a colcon `src/`
+directory use `.discovery-ros/` under the repository.
+
 **`--config` is optional.** This command uses the included
 `src/phyai_discovery_ros/config/discovery.json`; no separate JSON file is required.
 Installation settings are configured once in that default. Pass

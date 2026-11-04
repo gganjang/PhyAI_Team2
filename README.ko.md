@@ -93,7 +93,10 @@ bash scripts/run_discovery.sh     # 기본 설정으로 관찰 + 웹 뷰어
 
 **http://localhost:23518**에서 작업대 지도, 후보, 최종 목록, 손목·천장 카메라 영상을 봅니다.
 뷰어는 기본으로 켜지고 팔 자동 동작은 꺼져 있습니다.
-SAM2 의존성과 가중치는 처음 실행할 때 준비하고 이후 캐시를 재사용합니다.
+ROS와 워크스페이스를 자동으로 불러오고, 없는 Discovery 패키지는 SAM2 준비 전에 빌드합니다.
+코드를 pull한 뒤에는 `bash scripts/run_discovery.sh --build`로 다시 빌드합니다.
+다른 워크스페이스는 `PHYAI_WS=/path/to/workspace`로 지정합니다.
+독립 checkout은 `.discovery-ros/`를 사용합니다. SAM2 의존성과 가중치는 캐시를 재사용합니다.
 
 **`--config`는 선택 사항입니다.** 기본으로 포함된
 `src/phyai_discovery_ros/config/discovery.json`을 사용합니다.

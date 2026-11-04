@@ -94,7 +94,10 @@ bash scripts/run_discovery.sh     # uses the included default config; observatio
 
 Open **http://localhost:23518** for the workspace, candidates, inventory, and live
 wrist/overhead previews. The viewer is on by default; automatic arm motion is off.
-SAM2 dependencies and weights are prepared on first launch and cached afterward.
+The launcher sources ROS and the workspace, and builds missing discovery packages
+before preparing SAM2. After pulling changes, use `bash scripts/run_discovery.sh --build`
+to rebuild. Set `PHYAI_WS=/path/to/workspace` for another workspace. Standalone
+checkouts use `.discovery-ros/`. SAM2 dependencies and weights are cached afterward.
 
 **`--config` is optional.** The launcher automatically uses the included
 `src/phyai_discovery_ros/config/discovery.json`. Configure the installation once;
