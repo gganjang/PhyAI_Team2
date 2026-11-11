@@ -22,6 +22,12 @@ def test_scan_views_are_upright_varied_and_paths_clear_the_scene():
     reset_scene(model, data, scene)
     addresses = [model.joint(f'joint{i}').qposadr[0] for i in range(1, 7)]
     limits = np.array([model.joint(f'joint{i}').range for i in range(1, 7)])
+    # Survey paths use installation geometry, not the saved free-block layout.
+    # A scene edit can place a saved block inside the base before scattering.
+    for joint in range(model.njnt):
+        if model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE:
+            geoms = np.flatnonzero(model.geom_bodyid == model.jnt_bodyid[joint])
+            model.geom_contype[geoms] = model.geom_conaffinity[geoms] = 0
     labels = config['viewpoints']  # Focused poses are planned dynamically.
     positions, pitches = [], []
     previous = data.qpos[addresses].copy()
@@ -114,3 +120,19 @@ def test_survey_covers_lower_left_table_after_base_rotation(yaw):
                        for y in np.arange(-.48, 0, .08)])
     covered = _survey_coverage(model, config, scene, points, yaw)
     assert covered.mean() >= .95, points[~covered].tolist()
+
+
+@pytest.mark.parametrize('yaw', [0., np.pi/2])
+def test_survey_covers_plate_three_after_scene_edit(yaw):
+    scene_path = ROOT/'sim/piper_mujoco_sim/config/lab_scene.json'
+    scene = json.loads(scene_path.read_text())
+    config = json.loads((ROOT/'apps/junh/config/mujoco.json').read_text())
+    model = mujoco.MjModel.from_xml_string(build_scene(ROBOT, scene_path))
+    # Plate 3 is -X,+Y, including the far-left band missed by the former poses.
+    points = np.array([[x,y,.015] for x in np.arange(-.78,0,.08)
+                       for y in np.arange(.04,.521,.08)])
+    points = points[np.linalg.norm(points[:,:2]-scene['post_position'],axis=1)>.10]
+    covered = _survey_coverage(model, config, scene, points, yaw)
+    assert covered.mean()>=.95, points[~covered].tolist()
+    far_edge=points[:,0]<-.60
+    assert covered[far_edge].mean()>=.95, points[far_edge & ~covered].tolist()

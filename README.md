@@ -1,517 +1,221 @@
-# PhyAI Team2: ROS 2 apps for the PIPER arm
+# PhyAI Team2 · PIPER apps and discovery
 
 **English** | [한국어](README.ko.md)
 
-Develop an app in Docker, test it with MuJoCo, then run its runtime image on the control PC.
+Develop apps against MuJoCo, then connect them to the control PC through ROS 2.
+The simulator or hardware host supplies joint feedback, camera images, and TF;
+your app or the discovery scan controller sends joint commands.
 
-[Setup](#1-setup) → [Implement](#2-implement) → [Test](#3-test-with-mujoco) → [Build](#4-build-the-runtime-image) → [Run on the control PC](#5-run-on-the-control-pc)
+## Start here
 
-## 1. Setup
+Open the repository using **VS Code → Dev Containers: Reopen in Container**.
+The development PC needs Docker, an NVIDIA driver, and NVIDIA Container Toolkit.
+Run the commands below inside that container, from the repository root, unless noted.
 
-**What:** Open the shared Ubuntu 22.04 + ROS 2 Humble development environment.
-
-**How:** Open this repo in VS Code and run **Dev Containers: Reopen in Container**.
-
-**Expected result:** A container terminal with ROS 2 available; the repo is at `~/ws/src/PhyAI_Team2`.
-
-### Requirements
-
-| Where | Required |
-|---|---|
-| Dev PC running Docker | Linux (e.g. Ubuntu 24.04), NVIDIA driver, Docker, NVIDIA Container Toolkit |
-| PC running VS Code | Dev Containers extension; Remote - SSH extension for remote work |
-| Inside the container | App-specific ROS dependencies (`rosdep`) and Python libraries (`pip`) |
-
-The Docker image includes Ubuntu 22.04 and ROS 2 Humble. **The dev PC host can use Ubuntu 24.04**;
-it does not need Ubuntu 22.04 or a separate ROS installation. The current devcontainer uses Linux
-host networking and an NVIDIA GPU for the simulator view. A laptop used for SSH can run any OS.
-
-### Local or remote access
-
-- **Local:** Clone the repo on the dev PC, open it in VS Code, then reopen in the container.
-- **Remote:** Connect to `<user>@<dev-pc>` with **Remote-SSH: Connect to Host...**, open the repo
-  on that PC, then reopen in the container. Docker runs on the dev PC.
-
-The first container build takes a few minutes. `~/ws` is the colcon workspace.
-
-### Check the environment
-
-Run in the container:
+Build the shared components once, and rebuild after adding packages or launch files:
 
 ```bash
-ros2 doctor --report | head
-nvidia-smi
-```
-
-ROS diagnostics and GPU information should appear.
-
-## 2. Implement
-
-**What:** Create an app under `apps/<name>/`.
-
-**How:** Copy the example, rename its ROS package, and edit its Python code.
-
-**Expected result:** Your app has a `start.sh` and sends commands through ROS topics.
-
-```bash
-cd ~/ws/src/PhyAI_Team2
-cp -r apps/example apps/<name>
-mv apps/<name>/example_app apps/<name>/<your_pkg>
-```
-
-### Rename and organize the app
-
-Replace `example_app` with `<your_pkg>` in `package.xml`, `setup.py`, `setup.cfg`, `resource/`,
-the Python package folder, the launch file, and `start.sh`.
-
-```text
-apps/<name>/
-├── start.sh                 # starts your app
-├── requirements.txt         # optional pip dependencies
-└── <your_pkg>/              # one or more ROS packages
-    ├── package.xml
-    ├── setup.py / setup.cfg / resource/<your_pkg>
-    ├── <your_pkg>/*.py
-    └── launch/*.launch.py
-```
-
-Use lowercase letters, digits, `-`, and `_` for `<name>`. ROS package names must be unique across
-the repo. Keep app files inside `apps/<name>/`; runtime builds include that app and the shared
-packages under `src/`.
-
-### Robot interface
-
-Your app publishes targets; the simulator or control PC bridge receives them and returns feedback.
-
-| Topic | Message | Direction |
-|---|---|---|
-| `/joint_ctrl_single` *(provisional)* | `sensor_msgs/JointState`: `joint1`–`joint6` angles (rad), `joint7` gripper opening (0–0.035 m) | app → bridge |
-| `/joint_states` | `sensor_msgs/JointState`: `joint1`–`joint8` positions and velocities | bridge → app |
-| Camera topics *(TBD)* | `sensor_msgs/Image`, `CameraInfo` | camera driver → app |
-| `/tf` | `tf2_msgs/TFMessage`: transforms that change with time | `robot_state_publisher` and other TF publishers → app |
-| `/tf_static` | `tf2_msgs/TFMessage`: fixed transforms | `robot_state_publisher` and static TF publishers → app |
-| `/robot_description` | `std_msgs/String` (URDF) | `robot_state_publisher` → app |
-| `/sim/scene` *(simulator only)* | `std_msgs/String`: JSON block poses, robot kinematics, simulation time, pause state, restart ID | simulator → example |
-
-On the physical control PC, the bridge, camera driver, and
-`robot_state_publisher` are separate host processes. The bridge publishes measured
-joint feedback on `/joint_states`. `robot_state_publisher` subscribes to that
-feedback and uses the URDF robot description to compute link transforms: movable
-joints appear on `/tf`, and fixed joints appear on `/tf_static`. It also publishes
-the URDF on `/robot_description`; it does not command the arm.
-
-Camera drivers or dedicated transform publishers provide camera transforms as
-configured for the installation. A wrist camera can have a fixed mounting
-transform to an arm link while its transform relative to the robot base changes
-as the arm moves. Apps use joint feedback for joint configuration and velocity,
-and TF for link/camera poses in a common frame. For camera observations, use the
-transform at the image acquisition time. Collision and boundary checks also need
-robot collision geometry and scene obstacles; transforms alone describe poses.
-
-The host stack administrator confirms provisional topics and camera names. Arm commands currently
-follow the `piper_ros` convention. If the bridge uses custom messages, add their package to the base image.
-
-The active [Junh discovery workflow](apps/junh/README.md) scatters blocks and
-uses RGB-only wrist-camera sweeps, with optional supporting overhead input.
-Color is not a block identity or proposal rule. Monitoring, judgement and stacking
-are retired from that app. Camera depth is not consumed by its RGB configuration.
-
-### Use discovery in your own app
-
-Share these three packages; Junh and MuJoCo are not required:
-
-| Package | Responsibility |
-|---|---|
-| [`phyai_discovery`](src/phyai_discovery/README.md) | Python discovery, candidate selection, view budgets, measured inventory, and browser viewer |
-| `phyai_discovery_interfaces` | `GetBlockInfo` and `ReportView` ROS services |
-| [`phyai_discovery_ros`](src/phyai_discovery_ros/README.md) | Camera/TF transport, stationary capture checks, robot-adapter integration, and standalone viewer |
-
-The RGB backend discovers known-size blocks from calibrated RGB images; block
-color and camera depth are not discovery evidence. The wrist camera supplies
-geometry, with an optional initial overhead image for candidate proposals.
-The shared core also retains its legacy depth backend for existing consumers.
-
-```bash
-# From the colcon workspace:
+cd ~/ws
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-up-to phyai_discovery_ros
+colcon build --symlink-install --packages-up-to phyai_discovery_ros piper_mujoco_sim
 source install/setup.bash
-cp "$(ros2 pkg prefix --share phyai_discovery_ros)/config/discovery_rgb.json" /tmp/team-discovery.json
-# Edit the copied camera topics, table frame/scope, dimensions, and calibration.
-# From the repository root, start observation and the viewer:
-bash scripts/run_discovery.sh --config /tmp/team-discovery.json -- \
-  auto_scan:=false with_viewer:=true viewer_port:=23518
+cd src/PhyAI_Team2
 ```
 
-Open **http://localhost:23518** for the workspace map, candidates, and inventory.
-To attach the viewer to an existing producer, run
-`ros2 run phyai_discovery_ros viewer --ros-args -p http_port:=23518`.
-The [shared integration guide](src/phyai_discovery_ros/README.md) covers custom
-namespaces/topics, package-only setup, and embedding the viewer directly in Python.
-SAM2 dependencies and weights are provisioned on first launch and cached afterward.
-
-Discovery owns survey → focus → confirm decisions. Your robot adapter supplies
-feasible camera poses, IK/collision checks, movement, and verified arrival through
-`ReportView`. Implement `ScanNode.plan_view(request, current)` for candidate-directed
-motion; Junh supplies the MuJoCo example. Fixed-pose scans can use the generic
-controller with an installation-specific scan configuration. The observation-only
-launch above sends no arm commands. Hardware calibration, real-camera accuracy,
-and physical trajectories still require installation validation.
-
-### Dependencies and installed files
-
-| File | What to declare |
+| What you want | Start with |
 |---|---|
-| `package.xml` | Every ROS/rosdep dependency: `<exec_depend>` for runtime, `<build_depend>` for build, `<depend>` for both |
-| `requirements.txt` | Non-ROS Python dependencies without rosdep keys; pin versions |
-| `install_system_deps.sh` | Optional system libraries or CUDA Toolkit; run as root during image build |
-| `setup.py` | Executables in `console_scripts`; launch, config, URDF, and model files in `data_files` |
-| `start.sh` | Launch command, using `exec`; LF line endings |
+| Run the simulated host on its own | `bash scripts/run_sim_host.sh` |
+| Run your app against MuJoCo | `bash scripts/test_sim.sh <name>` |
+| Run discovery against an existing host | `bash scripts/run_discovery.sh` |
+| Try discovery integrated into an app | `bash apps/junh/run_sim.sh` |
+| Test the hardware-style interface in simulation | Run `run_sim_host.sh` and `run_discovery_sim.sh` in separate terminals |
 
-Example executable registration: `'example = example_app.example:main'`.
-Keep `setup.cfg` and `resource/<your_pkg>` so ROS can find the executable. Load installed assets with
-`get_package_share_directory('<your_pkg>')`. Check rosdep keys with `rosdep resolve <key>`.
-
-Runtime images install only execution dependencies and installed app files. Missing declarations
-can cause `ModuleNotFoundError` or missing files after deployment. Add only imported pip libraries;
-large packages slow image transfers. Hardware SDKs and drivers belong on the host.
-
-### Architecture and runtime constraints
-
-```text
-Control PC host: Ubuntu 22.04 + ROS 2 Humble
-├── piper_bridge → piper_sdk → CAN → arm
-├── camera driver
-└── robot_state_publisher
-          ↕ ROS 2 / DDS
-Runtime container (--network host)
-└── your app
-```
-
-The host owns all hardware. Apps use ROS topics and have no device access. Runtime apps run as
-`dev`, with ROS and the app sourced, and no display. Dev and runtime images share the same ROS base;
-[check the runtime image](#4-build-the-runtime-image) before deployment to verify its dependencies.
-
-## 3. Test with MuJoCo
-
-**What:** Run your app against a simulated arm.
-
-**How:** Run the test script inside the devcontainer, then open the browser URL.
-
-**Expected result:** The example picks one reachable block, lifts it, releases it above
-the table, and returns home. The terminal reports the stages and verified outcome.
+## 1. Independent simulation
 
 ```bash
-cd ~/ws/src/PhyAI_Team2
-bash scripts/test_sim.sh example
+bash scripts/run_sim_host.sh                              # random blocks by default
+bash scripts/run_sim_host.sh scatter_on_start:=false      # saved block positions
+bash scripts/run_sim_host.sh scatter_seed:=7              # repeatable random layout
 ```
 
-Open **http://localhost:23517**. Press **Ctrl+C** to stop.
+Open **http://localhost:23517**. The script starts only MuJoCo, with continuous
+ROS cameras (1280×960 for fitting) and joint command/feedback topics. It sources
+the workspace automatically. Use `camera_width:=640 camera_height:=480` to test
+lower-resolution camera inputs.
 
-### Select your app
+- **Overview:** arm, tables, and toggleable distance rulers.
+- **Overhead / wrist:** camera views.
+- **`/edit`:** edit the post, camera mounts, and poses. Preview pauses motion;
+  resume simulation before running a scan.
 
-Install your app's declared ROS dependencies with `rosdep` and any `requirements.txt` packages first.
-Then run:
+Edit the layout in [lab_scene.json](sim/piper_mujoco_sim/config/lab_scene.json).
+Structural changes need a simulator restart. Add options such as
+`http_port:=24517`, `camera_rate:=30.0`, or `scatter_table:=0_1` to the command.
+
+## 2. App-integrated simulation
 
 ```bash
-bash scripts/test_sim.sh <name>
-bash scripts/test_sim.sh          # select from a menu
+bash scripts/test_sim.sh <name>     # app under apps/<name>/
+bash scripts/test_sim.sh example    # sample pick-and-drop app
 ```
 
-The script builds the selected app and simulator, starts or reuses MuJoCo, then runs
-`apps/<name>/start.sh`. Your app controls motion through the [robot interface](#robot-interface).
-[example.py](apps/example/example_app/example_app/example.py) sends smooth arm/gripper targets at
-50 Hz for a fixed pick-and-drop sequence using the verified joint waypoints in
-[pick_drop.py](apps/example/example_app/example_app/pick_drop.py). The known layout uses
-`block_3` at (0.40, -0.33) m, 7.5 × 2.5 × 1.5 cm blocks, and the original base pose.
-It uses `/sim/scene` to verify the lift and landing; there is no runtime IK search.
-Scene-editor pauses also pause the sequence. **Restart simulation** in either browser
-page restores the arm and blocks and reruns the example without restarting its process.
-Restart keeps active scene settings and does not save or reload the JSON file.
-`sim_cmd.sh` is optional for manual commands.
+The runner builds the app and simulator, starts or reuses MuJoCo, then runs
+`apps/<name>/start.sh`. Open **http://localhost:23517**. It uses saved block
+positions when starting a simulator; the example expects its documented original
+layout. A reused simulator keeps its current scene.
 
-### Browser access
+To develop against the simulator API directly, run the independent host and start
+your app in another sourced terminal with the same `ROS_DOMAIN_ID`:
 
-| Access | URL |
+| Interface | App uses it to |
 |---|---|
-| On the dev PC | `http://localhost:23517` |
-| Another machine on the LAN | `http://<dev-pc-ip>:23517` |
-| Through SSH | Forward the port in VS Code's **Ports** panel, then use `http://localhost:23517` |
+| `/joint_ctrl_single` · `sensor_msgs/JointState` | Command joint1–6 in radians and joint7 gripper opening in meters |
+| `/joint_states` · `sensor_msgs/JointState` | Read measured joint positions and velocities |
+| `/{wrist,overhead}/color/image_rect_raw` + `/color/camera_info` | Receive RGB images and calibration |
+| `/tf`, `/tf_static` | Locate the camera and robot frames |
 
-Use the printed URL if you set another port. Rendering uses offscreen GPU/EGL and streams video;
-no desktop display is needed. The simulator is development-only. The browser includes virtual camera views. Enable `publish_cameras:=true` to publish rendered RGB-D, CameraInfo, and camera/base transforms on `/tf` for perception apps.
-Its model comes from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/agilex_piper).
-
-### Lab scene and camera views
-
-The default scene contains four 84 × 54 cm black tabletops in a 2 × 2 layout,
-a PIPER arm mounted near the combined table center, and six movable 7.5 × 2.5 × 1.5 cm blocks.
-Open the browser and select **Overview**, **Overhead camera**, or **Wrist camera**.
-The overview includes an X/Y/Z orientation gizmo; the overhead view shows X/Y.
-The arrows indicate positive world directions: X red, Y green, and Z blue.
-The overhead lens is 89 cm above the tabletop at X = +14 cm and Y = +51 cm relative to the
-combined table center, tilted 19° from vertical back toward the robot, with a 33° vertical field of view.
-The arm starts in `home_joints` (joint1-6, rad), the lab's start pose with the gripper pointing
-along +Y (parallel to the table seam at X = 0). Both were fitted to lab photos on 2026-10-30 and are estimates. The wrist camera follows `link6`.
-These are ideal RGB browser views, not an SR305 sensor/noise simulation or ROS RGB-D streams.
-Four overhead lights, ambient room fill, and camera-facing fill illuminate the scene.
-The `lighting` settings in `lab_scene.json` control ceiling height above the tabletop
-and ambient/diffuse/specular RGB strengths; `camera_fill` sets the camera-facing diffuse light. These are visual intensities, not calibrated
-lux measurements. Stop and relaunch the simulator process after changing lighting;
-the browser **Restart simulation** button only resets the robot and blocks.
-
-Edit [lab_scene.json](sim/piper_mujoco_sim/config/lab_scene.json) to adjust the layout.
-All distances are in meters. The world origin is the combined tabletop center; +Z points up,
-+X follows the 168 cm dimension, and +Y follows the 108 cm dimension.
-The robot base and post center are at X = +3 cm and Y = -2 cm relative to that origin,
-configured by `post_position`. The overhead lens uses `overhead_position` in the same frame.
-The 1 mm gap, 75 cm table height, 4 cm post radius, robot heading, 20 g block mass,
-friction, and exact wrist pose are initial estimates.
-The lab PIPER has a longer arm than the Menagerie model: upper arm 338 mm and forearm 322 mm
-(measured 33.8 / 32 cm) instead of 285 / 252 mm. `arm_geometry` in `lab_scene.json` stretches the model
-to match (`link3_pos`, `link4_pos` and a small joint2/joint3 zero turn), so the same joint readings put
-the gripper where the real one goes; the robot firmware's end pose agrees to 1.4 mm. The upper-arm and
-forearm meshes are stretched along the link. Without `arm_geometry` the model is the standard arm.
-The Isaac simulator keeps its converted standard-arm USD and prints a warning when the setting is present.
-The camera assembly is rigidly attached to the arm casing (`link5`), before the rotating
-`joint6`. Mount coordinates use `gripper_root_mount`, a reference frame aligned with
-the gripper root at zero wrist roll and fixed to that casing. Its +X is opposite
-zero-roll `link6` +X. `wrist_camera_mount_position` and `wrist_camera_mount_quaternion` move
-and rotate the whole assembly, including its pad, housing, and lens.
-`wrist_camera_position` and `wrist_camera_quaternion` set the camera lens pose relative
-to that mount (meters and `[w, x, y, z]`);
-they do not change the robot's wrist pose or joint positions.
-The silver camera bar spans perpendicular to the arm and attaches directly to the
-wrist casing through a thin pad, with no post. The hierarchy is
-`link5` → `wrist_mount_reference` → `gripper_root_mount` → `wrist_camera_mount`
-→ `wrist_camera_body` → `wrist` camera. The camera follows the casing exactly as
-the arm moves; gripper roll and finger opening do not move it relative to the casing.
-Housing dimensions are approximate. The lens looks parallel to the gripper's forward
-direction (gripper-root +Y, or `link6` +Z), rather than converging on the fingers,
-and the camera looks along its own -Z. `wrist_camera_roll_degrees` adjusts optical roll
-independently of the housing; the default is 0 because the mount frame now has
-image-up toward gripper-root +X and the bar width along gripper-root Z. Negative roll rotates
-the image counterclockwise.
-The leader arm is omitted.
-
-The default browser page (`/`) is a read-only viewer. Open `/edit` explicitly for the
-**Scene editor**, or launch with `scene_editing:=true` to show the editor at `/` too:
+Scattering is also available while the simulator runs:
 
 ```bash
-ros2 launch piper_mujoco_sim sim.launch.py scene_editing:=true
-# Or, when starting a new simulator through the helper:
-SCENE_EDITING=true bash scripts/test_sim.sh
+ros2 run piper_mujoco_sim scatter_blocks scatter --seed 7
+ros2 run piper_mujoco_sim scatter_blocks reset
 ```
 
-The helper prints both URLs; a reused simulator keeps its existing homepage mode.
-Editing APIs are confined to `/edit/scene`; viewing `/` does not activate editing for other viewers.
-The editor supports the arm base, camera mount, camera lens,
-overhead camera, field of view, and blocks. Positions use centimeters and rotations use
-degrees, with the parent frame shown beside each object. Preview applies edits live and
-pauses physics and incoming arm commands; **Resume simulation** continues motion.
-**Revert** restores the last saved layout, **Save scene** writes the configured JSON file,
-and **Reload scene file** loads pose edits made in your text editor. Custom MJCF models are view-only.
-Table dimensions and other structural settings still require a restart after manual editing.
+The lab scene uses the longer lab PIPER arm (338 mm upper arm, 322 mm forearm) through
+`arm_geometry`. See the [arm geometry details](docs/development.md#lab-scene-and-camera-views),
+including the Isaac simulator limitation.
 
-Restart the simulator after manually editing structural scene settings. An already running simulator reused by
-`test_sim.sh` keeps its old scene until stopped. To inspect without the example app moving the arm:
+App structure, dependencies, and simulator details: [development reference](docs/development.md).
+
+## 3. Independent discovery
+
+Start the host separately: either MuJoCo or the control PC's bridge, camera
+drivers, and calibrated TF. Discovery uses the configured ROS interfaces in both cases.
 
 ```bash
-cd ~/ws
-colcon build --symlink-install --packages-select piper_mujoco_sim
-source install/setup.bash
-ROS_DOMAIN_ID=42 ros2 launch piper_mujoco_sim sim.launch.py
+bash scripts/run_discovery.sh     # uses the included default config; observation + viewer
 ```
 
-A different configuration can be selected with `scene_config:=/absolute/path/config.json`.
-To load an existing MJCF instead, use `model_path:=/absolute/path/scene.xml`.
+Open **http://localhost:23518** for the workspace, candidates, inventory, and live
+wrist/overhead previews. The viewer is on by default; automatic arm motion is off.
+The launcher sources ROS and the workspace, and builds missing discovery packages
+before preparing SAM2. After pulling changes, use `bash scripts/run_discovery.sh --build`
+to rebuild. Set `PHYAI_WS=/path/to/workspace` for another workspace. Standalone
+checkouts use `.discovery-ros/`. SAM2 dependencies and weights are cached afterward.
 
-### Use block scattering from your own app
+**`--config` is optional.** The launcher automatically uses the included
+`src/phyai_discovery_ros/config/discovery.json`. Configure the installation once;
+you do not need to select a file on each run. Use `--config /path/other.json` only
+to override that default, for example for the separate simulation test.
 
-Scattering is provided by `piper_mujoco_sim` and does not require the Junh app,
-discovery nodes, or SAM 2. Build/source the simulator as above, then launch:
+| Config in `src/phyai_discovery_ros/config/` | Purpose |
+|---|---|
+| [discovery.json](src/phyai_discovery_ros/config/discovery.json) | Launcher default; observation, no fixed-pose scan section |
+| [discovery_rgb.json](src/phyai_discovery_ros/config/discovery_rgb.json) | RGB discovery and candidate-focus integration template |
+| [piper_scan.example.json](src/phyai_discovery_ros/config/piper_scan.example.json) | Fixed-pose scan template with targets and joint limits; adapt and validate for hardware |
+| [mujoco_interface.json](src/phyai_discovery_ros/config/mujoco_interface.json) | Standalone simulation template; wrapper syncs the current survey and inspection policy at launch |
+
+**Current limitation:** the default config has no fixed-pose scan section.
+To command motion today, supply a scan-enabled installation config:
 
 ```bash
-export ROS_DOMAIN_ID=43
-ros2 launch piper_mujoco_sim sim.launch.py \
-  http_port:=23518 publish_cameras:=true \
-  scatter_on_start:=true scatter_seed:=42 scatter_table:=all
+bash scripts/run_discovery.sh --config /path/scan-enabled.json -- auto_scan:=true
 ```
 
-Blocks scatter and settle before the first camera frame. Launch your own app in
-another sourced terminal using the same ROS domain. With the same scene/model,
-`scatter_seed:=42` reproduces the layout; omit it for a new random layout.
-`scatter_table` accepts `all`, `0_0`, `0_1`, `1_0`, or `1_1`.
-The shared launch defaults to aligned blocks unless `scatter_on_start:=true`.
+That config needs `scan.targets` and `scan.joint_limits`. Candidate-directed
+scanning needs a robot `plan_view` adapter as well.
+[Configuration and ROS integration guide](src/phyai_discovery_ros/README.md).
 
-To change a running scene or restore its aligned startup layout:
+## 4. App-integrated discovery
+
+The existing integrated example is Junh's scatter-and-discover app:
 
 ```bash
-ros2 run piper_mujoco_sim scatter_blocks scatter --seed 17 --url http://localhost:23518
-ros2 run piper_mujoco_sim scatter_blocks reset --url http://localhost:23518
+bash apps/junh/run_sim.sh                       # builds and starts the whole demo
+bash apps/junh/run_sim.sh --no-build            # reuse the build
+SCATTER_BLOCKS=false bash apps/junh/run_sim.sh   # saved block positions
 ```
 
-Both actions also reset the robot and increment `restart_id` on `/sim/scene`.
-Your app should clear cached observations and restart its own task when that ID
-changes. The simulator does not automatically restart another app's state machine.
-Scattering/reset do not rewrite the scene file. This feature requires the lab
-scene selected through `scene_config`; custom `model_path` scenes do not support it.
+It starts MuJoCo, discovery, a simulator-specific camera-view planner, and the
+viewer. Open **http://localhost:23517** and select **Workspace**.
+After saving scene edits, regenerate its survey with
+`python3 apps/junh/examples/plan_survey.py --write` before relaunching.
+[Junh workflow and limits](apps/junh/README.md).
 
-Apps can also POST JSON directly to `/simulation/blocks/scatter` with
-`{"seed":17,"table":"all"}`, or `/simulation/blocks/reset` with `{}` on the
-simulator's HTTP port. Responses include `restart_id` and block poses for test
-evaluation. Those poses are simulator ground truth, separate from camera-based
-perception. The HTTP client selects the simulator by URL, independently of ROS domain.
+For your own app, choose the integration boundary:
 
-### ROS domain, port, and existing servers
+- **ROS:** include `phyai_discovery_ros/launch/discovery.launch.py` in your app's
+  launch, supply its config, and use `ReportView` / `GetBlockInfo`. Let the app own
+  motion, or enable the shared fixed-pose controller. [ROS API](src/phyai_discovery_ros/README.md#app-interface).
+- **Python:** create one `phyai_discovery.Discovery` per session and feed calibrated
+  captures from your acquisition loop. [Python API and viewer](src/phyai_discovery/README.md#rgb-only-python-integration).
 
-| Setting | Default | Purpose |
+## 5. Check the interface before using hardware
+
+Run in separate terminals:
+
+```bash
+# Terminal 1: simulated host
+bash scripts/run_sim_host.sh
+
+# Terminal 2: shared discovery, survey + focused inspection, and camera viewer
+bash scripts/run_discovery_sim.sh
+```
+
+`run_discovery_sim.sh` copies the current survey from `apps/junh/config/mujoco.json`
+on every launch (currently 17 poses) and checks saved scene geometry. After the
+survey, it takes focused views of unresolved measured candidates using the
+configured robot/camera geometry planner and the same public ROS interfaces.
+Both scripts default to **ROS domain 142**. Look for arm movement, live camera images,
+verified survey captures, and `Search completed.` without scan faults. This tests
+the command/feedback/camera path; a partial inventory does not establish detection
+accuracy. The simulation poses are not validated hardware trajectories.
+[Detailed interface test](src/phyai_discovery_ros/README.md#test-the-shared-interface-against-standalone-mujoco).
+
+## Domains, ports, and stopping
+
+All connected components need the **same ROS domain**. Use a simulation domain
+separate from the physical robot's domain.
+
+| Launcher | Default ROS domain | Browser port |
 |---|---|---|
-| `ROS_DOMAIN_ID` | `42` | Shared ROS domain for app and simulator |
-| `HTTP_PORT` | `23517` | Fixed browser port |
+| `run_sim_host.sh`, `run_discovery_sim.sh` | 142 | 23517 / 23518 |
+| `test_sim.sh`, `apps/junh/run_sim.sh` | 42 | 23517 / 23518 for Junh's workspace |
+| `run_discovery.sh` | Inherits the shell; ROS defaults to 0 | 23518 |
 
-Give each developer a domain separate from teammates and the real robot:
+Override a domain with `ROS_DOMAIN_ID=143 bash …`. Discovery launch options go
+**after `--`**, for example `-- viewer_port:=24518 with_viewer:=true`.
+Use `-- with_viewer:=false` to disable its viewer. The ROS viewer listens on
+`0.0.0.0` by default: open `http://<host-ip>:23518` from another machine.
+Restrict it with `-- viewer_host:=127.0.0.1`, or forward the ports through VS Code. **Ctrl+C** stops the launched processes;
+`test_sim.sh` leaves a reused simulator running.
 
-```bash
-ROS_DOMAIN_ID=43 HTTP_PORT=23518 bash scripts/test_sim.sh <name>
-# Or set the domain for subsequent commands in this terminal:
-export ROS_DOMAIN_ID=43
-```
+## Shared server and Isaac Sim
 
-If the port is occupied, the script prints the process name, PID, and command. It reuses our MuJoCo
-simulator only on the same ROS domain. Domain mismatches and unrelated servers produce instructions;
-the script does not switch ports or stop existing servers. If ownership is unavailable, inspect the
-listener on the host.
+For the team's shared GPU server and Isaac Sim (`ROS_DOMAIN_ID=50`), see the
+[server access and reservation guide](server/README.md) and
+[Isaac Sim run guide](sim/piper_isaac_sim/README.md). They cover WebRTC viewing
+and the one-person-at-a-time lock.
 
-Ctrl+C stops the app and any simulator the script started. A reused simulator stays running.
-
-### Run components manually
-
-For separate app and simulator terminals, set the same `ROS_DOMAIN_ID` in both. Build and source first:
+## Tests and deployment
 
 ```bash
-cd ~/ws
-colcon build --symlink-install --packages-select <your_pkg> piper_mujoco_sim
-source install/setup.bash
-export ROS_DOMAIN_ID=43
-ros2 launch piper_mujoco_sim sim.launch.py
+bash scripts/test.sh viewer      # focused automated checks; also: ros, scan, scene
 ```
 
-In another terminal, source `~/ws/install/setup.bash`, set the same domain, and launch your app:
+From the **development PC host shell**, build and transfer an app image:
 
 ```bash
-ros2 launch <your_pkg> <file>.launch.py
+bash scripts/build_runtime.sh <name>
+bash scripts/deploy.sh <name> <user@control-pc>
 ```
 
-For a manual motion check, run from the repo root with the same domain:
+On the **control PC**, with its hardware host stack already running:
 
 ```bash
-bash scripts/sim_cmd.sh joint1=0.8 joint7=0.03
+ROS_DOMAIN_ID=10 ~/phyai/run_runtime.sh <name>   # match the host stack's actual domain
 ```
 
-Stop any app continuously sending targets before manual commands, since its targets will overwrite them.
-
-### Isaac Sim on the shared server
-
-The same robot, lab scene and ROS 2 topics also run in Isaac Sim 6.2.0 on the team's RTX 5090 server
-(`ROS_DOMAIN_ID=50`, viewed with the Isaac Sim WebRTC Streaming Client). See
-[sim/piper_isaac_sim](sim/piper_isaac_sim/README.md) for running and verification results, and
-[server/](server/README.md) for access and the one-person-at-a-time lock ([Korean quick start](server/README.md#팀원-사용법-빠른-시작)).
-
-## 4. Build the runtime image
-
-**What:** Package one app for deployment.
-
-**How:** Build from the repo root in the **dev PC host shell**, outside the devcontainer.
-
-**Expected result:** Docker image `phyai/app-<name>:latest`.
-
-```bash
-scripts/build_runtime.sh <name>
-```
-
-### Include CUDA and PyTorch
-
-**What:** Declare GPU dependencies per app.
-
-**How:** Edit `apps/<name>/requirements.txt` and, if needed, `install_system_deps.sh`, then rebuild.
-
-**Expected result:** The build and runtime images contain the declared packages; no install is needed on startup.
-
-For example, a CUDA 12.4 PyTorch wheel can be declared in `requirements.txt`:
-
-```text
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.5.1+cu124
-```
-
-This is an example version pair; select the wheel for your app and GPU using the
-[PyTorch installation instructions](https://pytorch.org/get-started/previous-versions/).
-For a separate CUDA Toolkit/compiler, adapt the commented recipe in
-[install_system_deps.sh](apps/example/install_system_deps.sh). The hook runs before pip installation,
-from a read-only directory containing dependency declarations; use `/tmp` for downloads and keep it self-contained.
-Its packages are included in the final image. Shell exports inside the hook do not persist to later stages.
-
-Devcontainer installs are not copied into runtime images. For local testing, apply the same declarations
-inside the devcontainer (`sudo bash apps/<name>/install_system_deps.sh`, then
-`pip3 install -r apps/<name>/requirements.txt`). The test runner does not install these automatically.
-The build needs network access for downloads; a prepared runtime image can run offline.
-The control PC still provides a compatible NVIDIA driver and Container Toolkit.
-
-### Check dependencies before building
-
-Inside the devcontainer:
-
-```bash
-rosdep install --from-paths ~/ws/src/PhyAI_Team2/apps/<name> --ignore-src -y --simulate
-```
-
-### Verify the built image
-
-In the dev PC host shell:
-
-```bash
-docker run --rm -it --network host -e ROS_DOMAIN_ID=43 phyai/app-<name>
-```
-
-Use your simulator's domain for feedback and motion testing. If the app works in development but
-fails here, check [dependencies and installed files](#dependencies-and-installed-files).
-`--symlink-install` can hide missing `data_files`, so test the actual runtime image.
-
-## 5. Run on the control PC
-
-**What:** Run a prepared runtime image against the control PC host stack.
-
-**How:** Start the app in the control PC shell.
-
-**Expected result:** The container runs `start.sh` and communicates with the robot through ROS topics.
-
-```bash
-# Control PC shell:
-~/phyai/run_runtime.sh <name>
-```
-
-### Control PC requirements
-
-- Docker; NVIDIA Container Toolkit if the app uses a GPU.
-- A user in the `docker` group.
-- The image `phyai/app-<name>:latest` and `~/phyai/run_runtime.sh` already available locally.
-- The host stack (piper_bridge, camera driver, robot_state_publisher) running on ROS 2 Humble.
-
-`run_runtime.sh` forwards the shell's `ROS_DOMAIN_ID` (default `0`); it must match the host stack.
-Only one app may drive the arm at a time; the runner refuses to start if another app is running.
-
-### Stop or debug
-
-Press Ctrl+C, or stop from another terminal. To debug, start a shell instead of the app:
-
-```bash
-docker stop phyai-<name>
-~/phyai/run_runtime.sh <name> bash
-```
-
-### DDS transport
-
-Different host/container user IDs can cause Fast DDS shared-memory transport to drop data even
-when topics are visible. Runtime images use [a UDP-only profile](docker/fastdds_udp.xml) to avoid this.
-Keep `FASTRTPS_DEFAULT_PROFILES_FILE` set to that profile.
+Check the installation domain in the [host guide](host/piper_host/README.md).
+Only one controller should drive the arm. The runtime app uses ROS; the host owns
+CAN, cameras, and drivers. [App creation, runtime dependencies, and deployment details](docs/development.md).

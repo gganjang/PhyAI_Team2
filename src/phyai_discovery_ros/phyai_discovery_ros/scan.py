@@ -177,12 +177,24 @@ class ScanNode(Node):
     def plan_view(self, request, current):
         """Robot adapter hook: return feasible joints for the requested target.
 
-        Subclasses own IK, collision/visibility checks and view geometry only.
+        Robot adapters own IK, collision/visibility checks and view geometry only.
         Candidate selection and budgets are owned by shared Discovery.
         """
-        if request.get('focus') is not None:
-            raise NotImplementedError('Candidate inspection requires a robot view-planner adapter.')
-        return self.targets[request['viewpoint']]
+        label=request['viewpoint']
+        if request.get('focus') is None:
+            target=self.targets[label]
+            if self.planner is not None:self.planner.remember(label,target)
+            return target
+        if self.planner is None:
+            from .view_planner import create_view_planner
+            self.planner=create_view_planner(self.config,self.targets)
+            for name,joints in self.selected_targets.items():self.planner.remember(name,joints)
+        plan=self.planner.choose([request['focus']],current,label)
+        self.inspection_focus=plan
+        if plan:
+            self.get_logger().info(f'Inspection {label}: focus {plan["focus"]} at {plan["position"]}')
+            return plan['joints']
+        return None
 
     def select_target(self,label):
         request = self.discovery.get('view_request')
@@ -196,7 +208,7 @@ class ScanNode(Node):
             return self.request_plans[key]
         try:
             target = self.plan_view(request, self.actual)
-        except NotImplementedError as error:
+        except (NotImplementedError, ValueError, OSError) as error:
             self.fault_stop(str(error))
             return None
         if target is not None:
@@ -292,6 +304,14 @@ class ScanNode(Node):
                 self.finish_future=self.finish_client.call_async(Trigger.Request())
             return
         if self.active is None:
+            # Planning can block this single-threaded executor long enough for
+            # the input checks at tick entry to expire. Keep the cached plan,
+            # but let subscriptions refresh before starting a command stream.
+            now=time.monotonic()
+            if not self.environment_ready(now):return
+            if now-self.feedback_received>1. or now-self.discovery_received>3.:
+                self.wait_reason='Waiting for fresh feedback and search progress.'
+                return
             limits=self.target_limits()
             if any(not low<=angle<=high for angle,(low,high) in zip(target[:6],limits)) or not 0<=target[6]<=.035:
                 self.fault_stop('Scan target exceeds PIPER joint limits.');return

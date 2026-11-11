@@ -1,0 +1,128 @@
+{
+  "map_frame": "world",
+  "scope": [
+    -0.8405,
+    0.8405,
+    -0.5405,
+    0.5405
+  ],
+  "cell_size": 0.02,
+  "capture_timeout": 30.0,
+  "max_retries": 2,
+  "input_max_age": 1.0,
+  "stationary_seconds": 0.25,
+  "stationary_tolerance": 0.003,
+  "feedback_timeout": 1.0,
+  "use_overhead": true,
+  "overhead_capture_timeout": 10.0,
+  "overhead_max_retries": 1,
+  "viewpoints": [
+    "interface_1",
+    "interface_2",
+    "interface_3"
+  ],
+  "inspection_rounds": [],
+  "candidate_focus": {
+    "enabled": false
+  },
+  "detector": {
+    "backend": "rgb",
+    "known_block_size": [
+      0.075,
+      0.025,
+      0.015
+    ],
+    "planar": true,
+    "pixel_error": 1.0,
+    "calibration_error": 0.0005
+  },
+  "segmentation": {
+    "backend": "sam2",
+    "device": "cuda",
+    "min_score": 0.7
+  },
+  "cameras": {
+    "overhead": {
+      "rgb_topic": "/overhead/color/image_rect_raw",
+      "info_topic": "/overhead/color/camera_info",
+      "intrinsics_file": null,
+      "calibration_revision": "mujoco_interface_test",
+      "rectified": true,
+      "roi": null,
+      "mask": null,
+      "mask_topic": null
+    },
+    "wrist": {
+      "rgb_topic": "/wrist/color/image_rect_raw",
+      "info_topic": "/wrist/color/camera_info",
+      "intrinsics_file": null,
+      "calibration_revision": "mujoco_interface_test",
+      "rectified": true,
+      "roi": null,
+      "mask": null,
+      "mask_topic": null
+    }
+  },
+  "scan": {
+    "approach_seconds": 3.0,
+    "move_seconds": 2.0,
+    "settle_seconds": 0.5,
+    "max_joint_speed": 0.6,
+    "max_joint_acceleration": 1.2,
+    "joint_limits": [
+      [
+        -2.618,
+        2.618
+      ],
+      [
+        0.0,
+        3.14
+      ],
+      [
+        -2.697,
+        0.0
+      ],
+      [
+        -1.832,
+        1.832
+      ],
+      [
+        -1.22,
+        1.22
+      ],
+      [
+        -3.14,
+        3.14
+      ]
+    ],
+    "targets": {
+      "interface_1": [
+        -0.9604792057951896,
+        0.32716427536993264,
+        -0.7925951506637942,
+        0.05490235962251802,
+        1.22,
+        0.0,
+        0.035
+      ],
+      "interface_2": [
+        -0.14713939635621276,
+        0.0,
+        -0.8473542570260488,
+        -0.07996645134630645,
+        1.22,
+        0.0,
+        0.035
+      ],
+      "interface_3": [
+        -0.11056856092544276,
+        0.2172984883171883,
+        -0.5054381410241678,
+        0.14247407184480188,
+        1.22,
+        0.0,
+        0.035
+      ]
+    }
+  }
+}

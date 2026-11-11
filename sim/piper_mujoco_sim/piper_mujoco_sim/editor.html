@@ -15,9 +15,17 @@ label{display:block;font-size:13px}input[type=number]{width:100%;margin-top:5px}
 .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:16px}.actions button{flex:1}#status{min-height:44px;line-height:1.5;font-size:13px;color:#b4c9e5}#status.error{color:#ff9797}
 #path{overflow-wrap:anywhere;font-size:12px}details{margin-top:18px}summary{cursor:pointer}.view.active{background:#245cb0}
 @media(max-width:850px){main{grid-template-columns:1fr}.viewport{position:static}aside{border-left:0;border-top:1px solid #303b4a}.viewport img{max-height:60vh}}
+#ruler-controls label{display:inline-flex;align-items:center;gap:5px;margin:4px 10px}#ruler-controls legend{font-size:14px;font-weight:600}
 </style></head><body>
 <header><h1>PIPER · Scene editor</h1><button class="view active" data-view="overview">Overview</button><button class="view" data-view="overhead">Overhead camera</button><button class="view" data-view="wrist">Arm camera</button><button id="pause" disabled>Pause simulation</button><a id="workspace-link" hidden>Workspace</a><a href="/">Viewer</a><button id="restart">Restart simulation</button></header>
-<main><section class="viewport"><img id="feed" alt="Live simulation"><p class="muted" id="caption">World axes: X red · Y green · Z blue</p></section>
+<main><section class="viewport"><img id="feed" alt="Live simulation"><fieldset id="ruler-controls" style="border:0;margin:8px 0;padding:0"><legend>Overview rulers (cm)</legend>
+<label><input type="checkbox" data-ruler="0" checked> Outer table edges</label>
+<label><input type="checkbox" data-ruler="1"> Plate 1 (−X, −Y)</label>
+<label><input type="checkbox" data-ruler="2"> Plate 2 (+X, −Y)</label>
+<label><input type="checkbox" data-ruler="3"> Plate 3 (−X, +Y)</label>
+<label><input type="checkbox" data-ruler="4"> Plate 4 (+X, +Y)</label>
+<label><input type="checkbox" data-ruler="5"> Gaps between plates</label>
+<p class="muted">Post surface to each selected plate’s edges. Negative = beyond that edge. Gap rulers measure adjacent plate edges.</p></fieldset><p class="muted" id="caption">World axes: X red · Y green · Z blue</p></section>
 <aside><h2>Edit scene</h2><select id="object" aria-label="Object to edit" disabled></select><div class="frame muted" id="frame">Loading scene…</div><form id="fields"></form>
 <label><input type="checkbox" id="auto" checked> Preview automatically after an edit</label>
 <p class="muted">Preview pauses physics and arm commands so you can inspect the placement. Resume when ready.</p>
@@ -31,7 +39,12 @@ label{display:block;font-size:13px}input[type=number]{width:100%;margin-top:5px}
 let activeView='overview';
 const feed=document.getElementById('feed');
 function pauseFeed(){feed.removeAttribute('src')}
-function resumeFeed(){if(!document.hidden)feed.src='/stream?view='+activeView}
+function rulerMask(){return [...document.querySelectorAll('[data-ruler]:checked')].reduce((mask,input)=>mask|(1<<Number(input.dataset.ruler)),0)}
+function resumeFeed(){
+ document.getElementById('ruler-controls').hidden=activeView!=='overview';
+ if(!document.hidden)feed.src='/stream?view='+activeView+'&rulers='+rulerMask();
+}
+document.querySelectorAll('[data-ruler]').forEach(input=>input.addEventListener('change',resumeFeed));
 document.addEventListener('visibilitychange',()=>document.hidden?pauseFeed():resumeFeed());
 window.addEventListener('pagehide',pauseFeed);
 window.addEventListener('pageshow',resumeFeed);

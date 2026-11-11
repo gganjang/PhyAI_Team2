@@ -17,7 +17,7 @@ GROUPS = {
         'test_search_criteria', 'test_search_evidence', 'test_focus')),
     'ros': ('src/phyai_discovery_ros/test', A+'test_node.py', A+'test_runtime.py'),
     'scan': (A+'test_sim_scan.py', A+'test_sim_views.py', S+'test_inspection.py'),
-    'scene': (S+'test_scene_editor.py', S+'test_scatter.py', S+'test_camera_ros.py',
+    'scene': (S+'test_scene_editor.py', S+'test_measurements.py', S+'test_ruler_streams.py', S+'test_scatter.py', S+'test_camera_ros.py',
               S+'test_robot_mask.py'),
     'viewer': (D+'test_viewer.py', A+'test_workspace_web.py', S+'test_workspace_proxy.py'),
     'sam2': (A+'test_rgb_survey.py', D+'test_sam2_rendered.py'),

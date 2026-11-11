@@ -103,3 +103,38 @@ def test_explicit_additional_view_budget_preserves_scan_and_default_limit():
     for invalid in (0, -1, True, 1.5):
         with pytest.raises(ValueError, match='positive integer'):
             feature.add_view(max_additional_views=invalid)
+
+
+def test_depth_cameras_with_quarter_turn_roll_agree_on_world_block_axis():
+    """Different optical orientations must not rotate map-frame long axes."""
+    from phyai_discovery.perception import Detector, DetectorConfig
+    size=np.array([.075,.025,.015]);centre=np.array([.10,.05]);yaw=np.deg2rad(30)
+    rz=np.array([[np.cos(yaw),-np.sin(yaw)],[np.sin(yaw),np.cos(yaw)]])
+    k=Intrinsics(640,480,600.,600.,319.5,239.5)
+    v,u=np.indices((k.height,k.width))
+    rays=np.stack(((u-k.cx)/k.fx,(v-k.cy)/k.fy,np.ones_like(u)),axis=-1)
+    found=[]
+    for name,roll,tilt,eye in [('overhead',0.,0.,[0,0,.7]),
+                              ('wrist',np.pi/2,.2,[.08,.02,.65])]:
+        c,s=np.cos(roll),np.sin(roll);ct,st=np.cos(tilt),np.sin(tilt)
+        rotation=np.array([[c,-s,0],[s,c,0],[0,0,1]])@np.array([[ct,0,st],[0,1,0],[-st,0,ct]])@np.diag([1.,-1.,-1.])
+        transform=np.eye(4);transform[:3,:3]=rotation;transform[:3,3]=eye
+        world_rays=rays@rotation.T
+        top_t=(size[2]-eye[2])/world_rays[:,:,2]
+        top_xy=np.asarray(eye)[:2]+top_t[:,:,None]*world_rays[:,:,:2]
+        local=(top_xy-centre)@rz
+        inside=np.all(abs(local)<=size[:2]/2,axis=2)
+        depth=np.where(inside,top_t,-eye[2]/world_rays[:,:,2]).astype(np.float32)
+        frame=Capture(name,1.,name+'_optical','base_link','measured',k,depth,transform,name)
+        detector=Detector(DetectorConfig(known_block_size=size.tolist()))
+        candidates=detector.detect(frame).candidates
+        assert len(candidates)==1
+        candidate=candidates[0]
+        np.testing.assert_allclose(candidate.position[:2],centre,atol=.003)
+        w,x,y,z=candidate.quaternion
+        measured=np.arctan2(2*(w*z+x*y),1-2*(y*y+z*z))
+        error=abs(np.arctan2(np.sin(2*(measured-yaw)),np.cos(2*(measured-yaw)))/2)
+        assert error<np.deg2rad(4)
+        found.append(measured)
+    difference=abs(np.arctan2(np.sin(2*(found[0]-found[1])),np.cos(2*(found[0]-found[1])))/2)
+    assert difference<np.deg2rad(4)

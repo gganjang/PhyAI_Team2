@@ -4,11 +4,14 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
+from urllib.parse import urlparse
 
 
 class WorkspaceWeb:
-    def __init__(self,port,simulator_port=0):
+    def __init__(self,port,simulator_port=0, *, cameras=None, host='127.0.0.1'):
         self.simulator_port=simulator_port
+        self.cameras={name: {'topic': topic, 'jpeg': None, 'received': None}
+                      for name, topic in (cameras or {}).items()}
         self.latest=None
         self.received=None
         self.lock=threading.Lock()
@@ -17,11 +20,25 @@ class WorkspaceWeb:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_GET(self):
-                if self.path in ('/','/workspace'):
+                path=urlparse(self.path).path
+                if path in ('/','/workspace'):
                     data=page;content='text/html; charset=utf-8';code=200
-                elif self.path=='/api/workspace':
+                elif path.startswith('/camera/') and path.endswith('.jpg'):
+                    name=path[len('/camera/'):-len('.jpg')]
+                    with owner.lock:
+                        camera=owner.cameras.get(name)
+                        if camera is None:
+                            data=b'Unknown camera';content='text/plain';code=404
+                        elif camera['received'] is None or time.monotonic()-camera['received']>2.:
+                            data=b'Waiting for fresh camera images';content='text/plain';code=503
+                        else:
+                            data=camera['jpeg'];content='image/jpeg';code=200
+                elif path=='/api/workspace':
                     with owner.lock:
                         data=json.dumps({'snapshot':owner.latest,'simulator_port':owner.simulator_port,
+                            'cameras': {name: {'topic': camera['topic'],
+                                'age': None if camera['received'] is None else time.monotonic()-camera['received']}
+                                for name, camera in owner.cameras.items()},
                             'publisher_age':None if owner.received is None else time.monotonic()-owner.received},allow_nan=False).encode()
                     content='application/json';code=200
                 else:data=b'Not found';content='text/plain';code=404
@@ -29,11 +46,17 @@ class WorkspaceWeb:
                 self.send_header('Content-Type',content)
                 self.send_header('Content-Length',str(len(data)))
                 self.send_header('Cache-Control','no-store')
-                self.end_headers();self.wfile.write(data)
-        self.server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
+                self.end_headers()
+                try:self.wfile.write(data)
+                except (BrokenPipeError,ConnectionResetError):pass
+        self.server=ThreadingHTTPServer((host,port),Handler)
         self.server.daemon_threads=True
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
         self.thread.start()
+
+    def update_camera(self, name, jpeg):
+        with self.lock:
+            self.cameras[name].update(jpeg=jpeg, received=time.monotonic())
 
     def update(self,snapshot,*,received=None):
         # Direct Python applications have no ROS query client. A finished core

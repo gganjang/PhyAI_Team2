@@ -1,6 +1,7 @@
 """Live/recorded fixed-view discovery; no arm command publisher or motion service."""
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -73,6 +74,11 @@ class DiscoveryNode(Node):
         self.workspace = self.discovery.workspace
         self.search = self.discovery.search
         self.detector = self.discovery.detector
+        self.robot_mask_model=None
+        self.robot_joint_history=deque(maxlen=600)
+        if self.config.get('view_planner',{}).get('robot_mask',False):
+            from .view_planner import RobotMaskModel
+            self.robot_mask_model=RobotMaskModel(self.config)
         self.rgb_only = self.config.get('detector', {}).get('backend') == 'rgb'
         self.stationarity = Stationarity(self.config.get('stationary_seconds',.5),
             self.config.get('stationary_tolerance',.003),self.config.get('feedback_timeout',1.))
@@ -208,6 +214,8 @@ class DiscoveryNode(Node):
             self.stationarity.clear()
             return
         self.stationarity.update(values,time.monotonic())
+        if self.robot_mask_model is not None and np.isfinite(values).all():
+            self.robot_joint_history.append((Time.from_msg(msg.header.stamp).nanoseconds/1e9,values))
 
     def on_mask(self,camera,msg):
         if msg.encoding != 'mono8' or msg.step < msg.width or len(msg.data) != msg.height*msg.step:
@@ -310,6 +318,9 @@ class DiscoveryNode(Node):
             capture = Capture(camera,stamp,msg.header.frame_id,self.workspace.frame,digest,k,depth,
                 transform_matrix(tf),self.search.target,roi=tuple(cfg['roi']) if cfg.get('roi') else None,
                 mask=mask,rgb=rgb_pixels)
+            if self.robot_mask_model is not None:
+                projected=self.robot_mask_model.project(capture,self.robot_joint_history)
+                capture=replace(capture,mask=projected if mask is None else mask | projected)
             self.pending_depth.pop(camera,None)
             self.submit(capture)
         except (ValueError,TypeError,KeyError,TransformException) as error:

@@ -153,3 +153,59 @@ def test_live_discovery_completes_using_only_shared_nodes_and_bridge_topics(tmp_
         executor.shutdown()
         for node in reversed(nodes):node.destroy_node()
         rclpy.try_shutdown()
+
+
+@pytest.mark.parametrize('stale', ['feedback', 'progress'])
+def test_slow_planning_rechecks_inputs_before_motion(scan, stale):
+    node,clock,commands,calls=scan
+    request={'session_id':'session','request_id':'slow-plan','viewpoint':'side'}
+    node.discovery['view_request']=request
+    planned=[]
+    def plan_view(request,current):
+        planned.append(1)
+        clock.now+=4.
+        # Isolate each stale input from the other one.
+        if stale=='feedback':node.discovery_received=clock.now
+        else:node.feedback_received=clock.now
+        return node.targets['side']
+    node.plan_view=plan_view
+    node.tick()
+    assert not commands and not calls
+    assert node.active is None and node.fault is None
+    assert node.wait_reason=='Waiting for fresh feedback and search progress.'
+    node.feedback_received=node.discovery_received=clock.now
+    node.tick()
+    assert node.active=='side' and commands and not node.fault
+    assert planned==[1]  # Reuse the completed plan after callbacks catch up.
+
+
+def test_configured_inspection_uses_selected_candidate_and_survey_history(scan,monkeypatch):
+    from phyai_discovery_ros import view_planner
+    node,clock,commands,calls=scan
+    remembered=[];selected=[]
+    target=node.targets['side']
+    planner=SimpleNamespace(remember=lambda label,joints:remembered.append((label,joints)),
+        choose=lambda targets,current,label:selected.extend(targets) or
+        {'joints':target,'focus':targets[0]['id'],'position':targets[0]['position']})
+    monkeypatch.setattr(view_planner,'create_view_planner',lambda config,targets:planner)
+    node.selected_targets={'side':target}
+    focus={'id':'measured_candidate','position':[.1,.2,.0075],'size':[.075,.025,.015],'priority':3}
+    request={'viewpoint':'focus_1','focus':focus}
+    assert node.plan_view(request,node.actual)==target
+    assert remembered==[('side',target)]
+    assert selected==[focus]
+    assert node.inspection_focus['focus']=='measured_candidate'
+
+
+def test_invalid_geometry_planner_stops_before_commands(scan,monkeypatch):
+    from phyai_discovery_ros import view_planner
+    node,clock,commands,calls=scan
+    def invalid(*args):raise ValueError('Installation model changed')
+    monkeypatch.setattr(view_planner,'create_view_planner',invalid)
+    node.discovery['view_request']={'session_id':'session','request_id':'focus',
+        'viewpoint':'side','focus':{'id':'measured','position':[.1,.2,.0075]}}
+    node.tick()
+    assert node.fault=='Installation model changed'
+    assert node.active is None and not calls
+    # fault_stop may issue a measured-position hold, never a planned trajectory.
+    assert all(command==node.actual for command in commands)

@@ -12,6 +12,10 @@ VIEWER_PAGE = Path(__file__).with_name('viewer.html').read_bytes()
 EDITOR_PAGE = Path(__file__).with_name('editor.html').read_bytes()
 
 
+def overview_hub(mask):
+    return 'overview' if mask == 1 else f'overview_rulers_{mask}'
+
+
 class FrameHub:
     def __init__(self):
         self.cond = threading.Condition()
@@ -68,7 +72,17 @@ def make_handler(hubs, editor=None, scene_editing=False, restart=None, workspace
                 except (URLError, TimeoutError, OSError):
                     self.respond(503, b'Workspace viewer is unavailable. Check the workspace_viewer launch logs, then reload this page.', 'text/plain')
             elif request.path == '/stream':
-                name = parse_qs(request.query).get('view', ['overview'])[0]
+                query = parse_qs(request.query)
+                name = query.get('view', ['overview'])[0]
+                if name == 'overview':
+                    try:
+                        mask = int(query.get('rulers', ['1'])[0])
+                        if not 0 <= mask < 64:
+                            raise ValueError
+                    except ValueError:
+                        self.respond(400, {'error': 'Invalid ruler selection.'})
+                        return
+                    name = overview_hub(mask)
                 if name not in hubs:
                     self.send_error(404)
                     return
