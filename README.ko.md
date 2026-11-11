@@ -80,6 +80,9 @@ ros2 run piper_mujoco_sim scatter_blocks scatter --seed 7
 ros2 run piper_mujoco_sim scatter_blocks reset
 ```
 
+실험실 장면은 `arm_geometry`로 긴 PIPER 팔(상완 338 mm, 전완 322 mm)을 사용합니다.
+Isaac 시뮬레이터의 제한을 포함한 [팔 형상 상세](docs/development.md#lab-scene-and-camera-views)를 참고하세요.
+
 앱 구조, 의존성, 시뮬레이터 상세: [개발 참고 문서](docs/development.md).
 
 ## 3. 독립 Discovery

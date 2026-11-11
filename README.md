@@ -81,6 +81,10 @@ ros2 run piper_mujoco_sim scatter_blocks scatter --seed 7
 ros2 run piper_mujoco_sim scatter_blocks reset
 ```
 
+The lab scene uses the longer lab PIPER arm (338 mm upper arm, 322 mm forearm) through
+`arm_geometry`. See the [arm geometry details](docs/development.md#lab-scene-and-camera-views),
+including the Isaac simulator limitation.
+
 App structure, dependencies, and simulator details: [development reference](docs/development.md).
 
 ## 3. Independent discovery

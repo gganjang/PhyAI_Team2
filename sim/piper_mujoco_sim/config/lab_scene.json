@@ -163,5 +163,20 @@
       0.9,
       1
     ]
-  ]
+  ],
+  "arm_geometry": {
+    "link3_pos": [
+      0.33784,
+      0.01547,
+      0.0
+    ],
+    "link4_pos": [
+      -0.31093,
+      0.08212,
+      0.0
+    ],
+    "joint2_zero_deg": 5.218,
+    "joint3_zero_deg": -5.099,
+    "note": "Lab PIPER: upper arm 338 mm, forearm 322 mm (measured 33.8 / 32 cm, 2026-11-11), longer than the Menagerie model (285 / 252 mm). Fitted to the robot firmware end pose (852 poses) to 1.4 mm."
+  }
 }
