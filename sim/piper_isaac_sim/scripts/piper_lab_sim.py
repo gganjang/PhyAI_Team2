@@ -58,6 +58,11 @@ import mujoco  # noqa: E402
 from piper_mujoco_sim.scene import build_scene, scene_snapshot  # noqa: E402
 
 config = json.load(open(args.scene_config))
+if config.get('arm_geometry'):
+    # The robot here is the converted Menagerie USD (standard arm); the MuJoCo sim stretches the arm to these lengths.
+    print('WARNING: scene arm_geometry (lab long-arm PIPER) is not applied in Isaac: the robot USD keeps the standard '
+          'Menagerie arm (upper arm 285 mm, forearm 252 mm). Fingertip positions differ from MuJoCo and the real arm.',
+          flush=True)
 mjm = mujoco.MjModel.from_xml_string(build_scene(args.robot_mjcf, args.scene_config))
 mjd = mujoco.MjData(mjm)
 mujoco.mj_resetDataKeyframe(mjm, mjd, mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_KEY, 'home'))

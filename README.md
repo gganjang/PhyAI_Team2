@@ -267,6 +267,12 @@ The robot base and post center are at X = +3 cm and Y = -2 cm relative to that o
 configured by `post_position`. The overhead lens uses `overhead_position` in the same frame.
 The 1 mm gap, 75 cm table height, 4 cm post radius, robot heading, 20 g block mass,
 friction, and exact wrist pose are initial estimates.
+The lab PIPER has a longer arm than the Menagerie model: upper arm 338 mm and forearm 322 mm
+(measured 33.8 / 32 cm) instead of 285 / 252 mm. `arm_geometry` in `lab_scene.json` stretches the model
+to match (`link3_pos`, `link4_pos` and a small joint2/joint3 zero turn), so the same joint readings put
+the gripper where the real one goes; the robot firmware's end pose agrees to 1.4 mm. The upper-arm and
+forearm meshes are stretched along the link. Without `arm_geometry` the model is the standard arm.
+The Isaac simulator keeps its converted standard-arm USD and prints a warning when the setting is present.
 The camera assembly is rigidly attached to the arm casing (`link5`), before the rotating
 `joint6`. Mount coordinates use `gripper_root_mount`, a reference frame aligned with
 the gripper root at zero wrist roll and fixed to that casing. Its +X is opposite
