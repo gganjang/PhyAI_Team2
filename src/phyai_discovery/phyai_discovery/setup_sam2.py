@@ -58,6 +58,11 @@ def write_runtime(runtime, python, checkpoint, info, device, config):
     for camera in data.get('cameras',{}).values():
         for key in ('mask','intrinsics_file'):
             if camera.get(key):camera[key]=str((config_path.parent/camera[key]).resolve())
+    for key in ('robot_path','scene_config'):
+        planner=data.get('view_planner',{})
+        if planner.get(key):planner[key]=str((config_path.parent/planner[key]).resolve())
+    if data.get('report_directory'):
+        data['report_directory']=str((config_path.parent/data['report_directory']).resolve())
     data['segmentation']={**data.get('segmentation',{}),'backend':'sam2',
         'checkpoint':str(checkpoint),'device':device,
         'model_config':'configs/sam2.1/sam2.1_hiera_t.yaml'}

@@ -1,0 +1,2 @@
+# Build-time COLLADA reader; MuJoCo is pinned by docker/Dockerfile.
+pycollada==0.9.3

@@ -54,13 +54,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # MuJoCo quick-trial simulator (stands in for the control PC host stack; see sim/ and README "Simulator").
 # Renders offscreen with EGL on the GPU and streams to a browser, so no X11/display is needed.
 ARG MUJOCO_VERSION=3.14.0
-ARG MENAGERIE_COMMIT=4d038b3feae26ec82b46a4d586379114012a8ac7
-RUN pip3 install --no-cache-dir mujoco==${MUJOCO_VERSION} \
-    && git clone --filter=blob:none --sparse https://github.com/google-deepmind/mujoco_menagerie /opt/mujoco_menagerie \
-    && cd /opt/mujoco_menagerie \
-    && git sparse-checkout set agilex_piper \
-    && git checkout ${MENAGERIE_COMMIT} \
-    && rm -rf .git \
+ARG PIPER_URDF_COMMIT=680fa925cd00db7e2628563d2edc5540963045de
+COPY sim/models /opt/phyai-model-tools
+# Keep the historical model path so existing launch/config/test paths resolve to PiPER-L.
+# Explicitly include the upstream LICENSE for the base image's non-cone sparse checkout.
+RUN pip3 install --no-cache-dir mujoco==${MUJOCO_VERSION} -r /opt/phyai-model-tools/requirements.txt \
+    && git clone --filter=blob:none --sparse https://github.com/agilexrobotics/agx_arm_urdf /tmp/agx_arm_urdf \
+    && git -C /tmp/agx_arm_urdf sparse-checkout set piper_l agx_gripper LICENSE \
+    && git -C /tmp/agx_arm_urdf checkout ${PIPER_URDF_COMMIT} \
+    && python3 /opt/phyai-model-tools/build_piper_l.py --source /tmp/agx_arm_urdf \
+         --output /opt/mujoco_menagerie/agilex_piper --revision ${PIPER_URDF_COMMIT} \
+    && rm -rf /tmp/agx_arm_urdf \
     # The NVIDIA runtime mounts libEGL_nvidia but not its glvnd registration; without it EGL falls back to Mesa
     && mkdir -p /usr/share/glvnd/egl_vendor.d \
     && echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \

@@ -41,6 +41,16 @@ def transform_matrix(msg):
     return matrix
 
 
+def rgb_array(msg):
+    if msg.encoding not in ('rgb8','bgr8') or msg.step<msg.width*3 or len(msg.data)!=msg.height*msg.step:
+        raise ValueError('RGB capture requires matching rgb8/bgr8 image rows.')
+    pixels=np.ndarray((msg.height,msg.width,3),dtype=np.uint8,buffer=msg.data,
+                      strides=(msg.step,3,1))
+    if msg.encoding=='bgr8':pixels=pixels[:,:,::-1]
+    pixels.setflags(write=False)
+    return pixels
+
+
 class DiscoveryNode(Node):
     def __init__(self, *, node_name='discovery', config_package='phyai_discovery_ros',
                  interface_prefix='discovery', inventory_name='workspace', **kwargs):
@@ -50,12 +60,28 @@ class DiscoveryNode(Node):
         config_path = Path(self.get_parameter('config_path').value or
                            get_package_share_directory(config_package)+'/config/discovery.json')
         self.config = json.loads(config_path.read_text())
+        self.input_max_future_skew=float(self.config.get('input_max_future_skew',0.))
+        if not np.isfinite(self.input_max_future_skew) or self.input_max_future_skew<0:
+            raise ValueError('input_max_future_skew must be finite and nonnegative.')
+        from .view_planner import resolve_planner_paths
+        resolve_planner_paths(self.config,config_path.parent)
+        self.capture_archive=None
+        if self.config.get('report_directory'):
+            from phyai_discovery.diagnostics import CaptureArchive
+            self.capture_archive=CaptureArchive(config_path.parent/self.config['report_directory'])
         recording = self.get_parameter('recording_path').value
         self.recording_entries = None
         if recording:
             manifest,self.recording_base = load_manifest(recording)
             self.recording_entries = manifest['captures']
             self.config.update(map_frame=manifest['map_frame'],viewpoints=manifest['viewpoints'],scope=manifest.get('scope'))
+            # Archived transforms already target the manifest's map frame.
+            self.config.pop('coordinate_system',None)
+            if 'coordinate_system' in manifest:
+                self.config['coordinate_system']=manifest['coordinate_system']
+            # A historical scene may use a different origin or competition
+            # policy. Never apply today's hardware exclusion to its geometry.
+            self.config['excluded_regions']=manifest.get('excluded_regions',[])
             if 'stacking_zone_position' in manifest:
                 self.config['stacking_zone_position'] = manifest['stacking_zone_position']
         file_calibrations = {}
@@ -87,6 +113,8 @@ class DiscoveryNode(Node):
         self.stream_rgb = {}
         self.overlay_pubs = {camera:self.create_publisher(Image,f'{interface_prefix}/{camera}/overlay',1)
                              for camera in ('overhead','wrist')}
+        self.accepted_capture_pub=self.create_publisher(String,f'{interface_prefix}/accepted_capture',
+            QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.masks = {}
         self.dynamic_masks = {}
         self.pending_depth = {}
@@ -248,11 +276,7 @@ class DiscoveryNode(Node):
             self.record_input(camera)
         # Keep just the newest immutable view of the ROS-owned buffer. A capture
         # retains its array's backing buffer while its worker uses it.
-        rgb = np.ndarray((msg.height,msg.width,3),dtype=np.uint8,buffer=msg.data,
-                         strides=(msg.step,3,1))
-        if msg.encoding == 'bgr8':
-            rgb = rgb[:,:,::-1]
-        rgb.setflags(write=False)
+        rgb = rgb_array(msg)
         self.rgb[camera] = (Time.from_msg(msg.header.stamp).nanoseconds/1e9,msg.header.frame_id,rgb)
         if self.rgb_only:
             self.on_image(camera, msg)
@@ -276,8 +300,10 @@ class DiscoveryNode(Node):
             return
         stamp = Time.from_msg(msg.header.stamp).nanoseconds/1e9
         age = self.get_clock().now().nanoseconds/1e9-stamp
-        if stamp < self.request_stamp or not 0 <= age <= self.config.get('input_max_age',1.):
-            self.last_error = 'Image predates capture request or has an invalid/stale timestamp.'
+        if stamp < self.request_stamp or not -self.input_max_future_skew <= age <= self.config.get('input_max_age',1.):
+            self.last_error = ('Image predates capture request or has an invalid/stale timestamp. '
+                               f'age={age:.3f}s; allowed future skew={self.input_max_future_skew:.3f}s.')
+            if self.pending_depth.get(camera) is msg:self.pending_depth.pop(camera,None)
             return
         try:
             info = self.info.get(camera)
@@ -299,12 +325,16 @@ class DiscoveryNode(Node):
             depth = None if self.rgb_only else decode_depth(
                 msg.data,msg.width,msg.height,msg.step,msg.encoding,
                 bool(msg.is_bigendian),cfg.get('depth_scale',.001))
-            tf = self.tf.lookup_transform(self.workspace.frame,msg.header.frame_id,Time.from_msg(msg.header.stamp))
+            from phyai_discovery.coordinates import source_frame, camera_to_map
+            tf = self.tf.lookup_transform(source_frame(self.config),msg.header.frame_id,Time.from_msg(msg.header.stamp))
             digest = hashlib.sha256(json.dumps([list(info.k),list(info.p),list(info.d),
                 info.header.frame_id,info.width,info.height,cfg.get('depth_scale',.001),
                 cfg.get('calibration_revision','unversioned')]).encode()).hexdigest()[:16]
             rgb = self.rgb.get(camera)
-            rgb_pixels = rgb[2] if rgb is not None and abs(rgb[0]-stamp) <= .05 and rgb[1] == msg.header.frame_id else None
+            # A pending RGB-only capture must retain its own pixels while TF
+            # catches up; the newest preview may already be a different frame.
+            rgb_pixels = (rgb_array(msg) if self.rgb_only else
+                rgb[2] if rgb is not None and abs(rgb[0]-stamp) <= .05 and rgb[1] == msg.header.frame_id else None)
             if self.detector.segmenter is not None and rgb_pixels is None:
                 raise ValueError('Waiting for capture-matched aligned RGB.')
             mask=self.masks.get(camera)
@@ -316,7 +346,7 @@ class DiscoveryNode(Node):
                     raise ValueError('Waiting for the capture-matched robot mask.')
                 mask=dynamic[2] if mask is None else mask | dynamic[2]
             capture = Capture(camera,stamp,msg.header.frame_id,self.workspace.frame,digest,k,depth,
-                transform_matrix(tf),self.search.target,roi=tuple(cfg['roi']) if cfg.get('roi') else None,
+                camera_to_map(self.config,transform_matrix(tf)),self.search.target,roi=tuple(cfg['roi']) if cfg.get('roi') else None,
                 mask=mask,rgb=rgb_pixels)
             if self.robot_mask_model is not None:
                 projected=self.robot_mask_model.project(capture,self.robot_joint_history)
@@ -326,13 +356,15 @@ class DiscoveryNode(Node):
         except (ValueError,TypeError,KeyError,TransformException) as error:
             self.last_error = str(error)
             if isinstance(error,TransformException) or 'capture-matched' in str(error):
-                self.pending_depth[camera]=msg
+                # Keep the oldest fresh pending frame so TF can catch up rather
+                # than chasing the latest future-stamped image indefinitely.
+                self.pending_depth.setdefault(camera,msg)
             # Missing TF/calibration can recover before the pending capture times out.
 
     def submit(self,capture):
         self.job = self.discovery.begin(capture, stationary=True)
         self.job_started = time.monotonic()
-        self.future = self.worker.submit(self.detector.detect,capture)
+        self.future = self.worker.submit(self.detector.detect,self.job.capture)
         self.last_error = None
 
     def report_view_service(self, request, response):
@@ -409,6 +441,7 @@ class DiscoveryNode(Node):
                 self.detection_totals[job.capture.camera] = self.detection_totals.get(job.capture.camera, 0)+1
                 if self.discovery.complete(job,detection):
                     self.publish_overlay(job.capture,detection)
+                    self.publish_capture_diagnostics(job.capture,detection)
             except Exception as error:
                 if self.discovery.fail(job,error):
                     self.last_error = str(error)
@@ -450,6 +483,19 @@ class DiscoveryNode(Node):
         msg.data = pixels.tobytes()
         self.overlay_pubs[capture.camera].publish(msg)
 
+    def publish_capture_diagnostics(self,capture,detection):
+        if capture.rgb is None:return
+        from phyai_discovery.diagnostics import capture_packet
+        try:
+            packet=capture_packet(capture,detection,getattr(self.detector,'observer',None),
+                session_id=self.workspace.session,revision=self.workspace.revision,
+                phase='candidate_inspection' if capture.inspection_target else 'overview' if capture.camera=='overhead' else 'survey',
+                focus=capture.inspection_target)
+            if self.capture_archive:self.capture_archive.capture(packet)
+            self.accepted_capture_pub.publish(String(data=json.dumps(packet,allow_nan=False)))
+        except (OSError,ValueError,TypeError) as error:
+            self.get_logger().error('Cannot preserve accepted-image diagnostics: '+str(error))
+
     def camera_rates(self):
         now = time.monotonic()
         def rate(samples):
@@ -465,7 +511,7 @@ class DiscoveryNode(Node):
 
     def candidate_progress(self):
         confirmed = len(self.workspace.tracks)
-        total = len(self.workspace.hypotheses)
+        total = len(self.workspace.hypotheses)+len(self.workspace.unverified_hypotheses)
         survey = self.search.index < len(self.search.base_viewpoints) and not self.search.inspection_round
         phase = ('finished' if self.search.state == SearchState.FINISHED else
                  'survey' if survey else 'candidate_inspection')
@@ -519,6 +565,10 @@ class DiscoveryNode(Node):
                                    f'({len(self.workspace.tracks)} tracks); input: {self.last_error or "ready/waiting"}')
             self.logged_status = status
         self.data_pub.publish(String(data=json.dumps(envelope,allow_nan=False)))
+        if self.capture_archive:
+            try:self.capture_archive.report(envelope)
+            except (OSError,ValueError,TypeError) as error:
+                self.get_logger().error('Cannot persist discovery report: '+str(error))
 
     def destroy_node(self):
         self.worker.shutdown(wait=True,cancel_futures=True)

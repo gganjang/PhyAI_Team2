@@ -1,18 +1,19 @@
 #!/bin/bash
-# Provision SAM2, source its environment, then launch the shared ROS feature.
-# Setup options precede --; ROS launch arguments follow it. Viewer is on by default.
+# Provision the selected segmentation model, then launch the shared ROS feature.
+# Setup options precede --; ROS launch arguments follow it. Viewer and scan are on by default.
 set -euo pipefail
 DISCOVERY_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISCOVERY_RUNTIME="${PHYAI_SAM2_RUNTIME_DIR:-$DISCOVERY_REPO/.discovery-sam2}"
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'HELP'
-Usage: scripts/run_discovery.sh [--build] [SAM2 setup options] [-- ROS launch arguments]
+Usage: scripts/run_discovery.sh [--build] [model setup options] [-- ROS launch arguments]
 
 Default config: src/phyai_discovery_ros/config/discovery.json
 ROS and workspace setup are sourced automatically. Missing discovery packages
-are built before starting SAM2. Use --build to rebuild after pulling changes.
+are built before starting the model. Use --build to rebuild after pulling changes.
 Set PHYAI_WS for an existing workspace; standalone checkouts use .discovery-ros/.
-Viewer: http://<host-ip>:23518. Arm scanning is off unless auto_scan:=true.
+Viewer: http://<host-ip>:23518. Arm scanning is on; disable with -- auto_scan:=false.
+Automatic scanning requires scan targets and joint limits in the selected config.
 HELP
   exit 0
 fi
@@ -27,21 +28,23 @@ while [ $# -gt 0 ] && [ "$1" != -- ]; do
   shift
 done
 if [ "${1:-}" = -- ]; then shift; fi
-# The runtime location is selected by PHYAI_SAM2_RUNTIME_DIR, not a setup override.
+# Select the model cache with its runtime environment variable.
 for option in "${DISCOVERY_SETUP_ARGS[@]}"; do
   if [[ "$option" == --runtime-dir* ]]; then
-    echo 'Set PHYAI_SAM2_RUNTIME_DIR to select the launcher cache.' >&2; exit 2
+    echo 'Set PHYAI_YOLO26_RUNTIME_DIR, PHYAI_SAM31_RUNTIME_DIR, or PHYAI_SAM2_RUNTIME_DIR to select the model cache.' >&2; exit 2
   fi
 done
 DISCOVERY_VIEWER=true
 DISCOVERY_VIEWER_PORT=23518
 DISCOVERY_VIEWER_HOST=0.0.0.0
 DISCOVERY_VIEWER_EXPLICIT=false
+DISCOVERY_SCAN_EXPLICIT=false
 for option in "$@"; do
   if [[ "$option" == config_path:=* ]]; then
-    echo 'Use --config /path/to/installation.json before -- so SAM2 is configured automatically.' >&2; exit 2
+    echo 'Use --config /path/to/installation.json before -- so the model is configured automatically.' >&2; exit 2
   fi
   case "$option" in
+    auto_scan:=*) DISCOVERY_SCAN_EXPLICIT=true ;;
     with_viewer:=*) DISCOVERY_VIEWER="${option#with_viewer:=}"; DISCOVERY_VIEWER_EXPLICIT=true ;;
     viewer_host:=*) DISCOVERY_VIEWER_HOST="${option#viewer_host:=}" ;;
     viewer_port:=*) DISCOVERY_VIEWER_PORT="${option#viewer_port:=}" ;;
@@ -49,6 +52,22 @@ for option in "$@"; do
 done
 if [ "$DISCOVERY_VIEWER_EXPLICIT" = false ]; then
   set -- with_viewer:=true "$@"
+fi
+if [ "$DISCOVERY_SCAN_EXPLICIT" = false ]; then
+  set -- auto_scan:=true "$@"
+fi
+DISCOVERY_PACKAGES=(phyai_discovery phyai_discovery_interfaces phyai_discovery_ros)
+DISCOVERY_CONFIG_INPUT="$DISCOVERY_REPO/src/phyai_discovery_ros/config/discovery.json"
+for ((index=0; index<${#DISCOVERY_SETUP_ARGS[@]}; index++)); do
+  case "${DISCOVERY_SETUP_ARGS[index]}" in
+    --config) DISCOVERY_CONFIG_INPUT="${DISCOVERY_SETUP_ARGS[index+1]:-}" ;;
+    --config=*) DISCOVERY_CONFIG_INPUT="${DISCOVERY_SETUP_ARGS[index]#--config=}" ;;
+  esac
+done
+if [[ -f "$DISCOVERY_CONFIG_INPUT" ]] && python3 -c \
+  'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("view_planner",{}).get("backend")!="mujoco_geometry")' \
+  "$DISCOVERY_CONFIG_INPUT"; then
+  DISCOVERY_PACKAGES+=(piper_mujoco_sim)
 fi
 # ROS setup scripts are not guaranteed to work with nounset enabled.
 if [[ -n "${PHYAI_WS:-}" ]]; then
@@ -70,7 +89,7 @@ if ! command -v ros2 >/dev/null; then
   echo 'ROS 2 is unavailable. Install/source ROS 2 Humble before running discovery.' >&2
   exit 1
 fi
-for package in phyai_discovery phyai_discovery_interfaces phyai_discovery_ros; do
+for package in "${DISCOVERY_PACKAGES[@]}"; do
   if ! ros2 pkg prefix "$package" >/dev/null 2>&1; then DISCOVERY_BUILD=true; fi
 done
 if [[ "$DISCOVERY_BUILD" == true ]]; then
@@ -81,18 +100,34 @@ if [[ "$DISCOVERY_BUILD" == true ]]; then
   echo "Building discovery packages in $DISCOVERY_WS"
   mkdir -p "$DISCOVERY_WS"
   (cd "$DISCOVERY_WS" && colcon build --symlink-install \
-    --base-paths "$DISCOVERY_REPO/src" --packages-up-to phyai_discovery_ros)
+    --base-paths "$DISCOVERY_REPO/src" "$DISCOVERY_REPO/sim/piper_mujoco_sim" \
+    --packages-up-to "${DISCOVERY_PACKAGES[@]}")
   set +u
   source "$DISCOVERY_WS/install/setup.bash"
   set -u
 fi
-for package in phyai_discovery phyai_discovery_interfaces phyai_discovery_ros; do
+for package in "${DISCOVERY_PACKAGES[@]}"; do
   if ! ros2 pkg prefix "$package" >/dev/null 2>&1; then
     echo "Package $package is still unavailable in $DISCOVERY_WS; check the build output and PHYAI_WS." >&2
     exit 1
   fi
 done
-bash "$DISCOVERY_REPO/scripts/setup_discovery_sam2.sh" "${DISCOVERY_SETUP_ARGS[@]}"
+DISCOVERY_BACKEND=sam2
+if [[ -f "$DISCOVERY_CONFIG_INPUT" ]]; then
+  DISCOVERY_BACKEND="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("segmentation",{}).get("backend","sam2"))' "$DISCOVERY_CONFIG_INPUT")"
+fi
+if [[ "$DISCOVERY_BACKEND" == yolo26n-seg ]]; then
+  DISCOVERY_RUNTIME="${PHYAI_YOLO26_RUNTIME_DIR:-$DISCOVERY_REPO/.discovery-yolo26}"
+  python3 "$DISCOVERY_REPO/src/phyai_discovery/phyai_discovery/setup_yolo26.py" \
+    --runtime-dir "$DISCOVERY_RUNTIME" --config "$DISCOVERY_CONFIG_INPUT" "${DISCOVERY_SETUP_ARGS[@]}"
+elif [[ "$DISCOVERY_BACKEND" == sam3.1 ]]; then
+  DISCOVERY_RUNTIME="${PHYAI_SAM31_RUNTIME_DIR:-$DISCOVERY_REPO/.discovery-sam31}"
+  bash "$DISCOVERY_REPO/scripts/setup_discovery_sam31.sh" "${DISCOVERY_SETUP_ARGS[@]}"
+elif [[ "$DISCOVERY_BACKEND" == sam2 ]]; then
+  bash "$DISCOVERY_REPO/scripts/setup_discovery_sam2.sh" "${DISCOVERY_SETUP_ARGS[@]}"
+else
+  echo "Unsupported launcher segmentation backend: $DISCOVERY_BACKEND" >&2; exit 2
+fi
 source "$DISCOVERY_RUNTIME/env.sh"
 case "$DISCOVERY_VIEWER" in
   true|True|TRUE|1)

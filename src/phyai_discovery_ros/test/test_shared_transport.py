@@ -18,6 +18,10 @@ from phyai_discovery_ros.node import DiscoveryNode
 
 def test_recorded_inventory_and_restart_over_shared_interfaces(tmp_path):
     config = json.loads((Path(__file__).parents[1]/'config/discovery.json').read_text())
+    config.update(detector={'known_block_size':[.075,.025,.015]},
+                  segmentation={'backend':'depth'},scope=None)
+    for key in ('view_planner','candidate_focus','inspection_rounds','search_criteria','report_directory'):
+        config.pop(key,None)
     config_path = tmp_path/'hardware.json'
     config_path.write_text(json.dumps(config))
     # Downward pinhole at z=1m: one 75x25x15mm cuboid on a horizontal table.
@@ -91,7 +95,35 @@ def test_recorded_inventory_and_restart_over_shared_interfaces(tmp_path):
         rclpy.try_shutdown()
 
 
-def test_rgb_live_adapter_submits_without_depth_and_retries_pending_tf(tmp_path, monkeypatch):
+def test_default_hardware_config_uses_rgb_without_depth_subscriptions(monkeypatch):
+    from types import SimpleNamespace
+    from phyai_discovery import engine
+    from phyai_discovery.rgb import RGBDetector
+    monkeypatch.setattr(engine, 'make_segmenter', lambda _: SimpleNamespace(propose=lambda _: []))
+    path = Path(__file__).parents[1]/'config/discovery.json'
+    rclpy.init()
+    node = None
+    try:
+        node = DiscoveryNode(parameter_overrides=[Parameter('config_path',value=str(path))])
+        assert isinstance(node.detector, RGBDetector)
+        topics = [topic for topic, _ in node.get_subscriber_names_and_types_by_node(
+            node.get_name(), node.get_namespace())]
+        for camera in ('overhead', 'wrist'):
+            assert f'/{camera}/color/image_rect_raw' in topics
+            assert f'/{camera}/color/camera_info' in topics
+        assert not any('/depth/' in topic for topic in topics)
+        assert node.config['map_frame'] == 'tabletop'
+        assert node.config['coordinate_system']['source_frame'] == 'base_link'
+        assert node.config['scope'] == pytest.approx([-.8405, .8405, -.5005, .5005])
+        assert set(node.config['viewpoints']) == set(node.config['scan']['targets'])
+        assert all(target[6] == .035 for target in node.config['scan']['targets'].values())
+    finally:
+        if node is not None: node.destroy_node()
+        rclpy.try_shutdown()
+
+
+@pytest.mark.parametrize('newer_rgb_arrives',[False,True])
+def test_rgb_live_adapter_submits_without_depth_and_retries_pending_tf(tmp_path, monkeypatch,newer_rgb_arrives):
     from types import SimpleNamespace
     from rclpy.parameter import Parameter
     from sensor_msgs.msg import CameraInfo, Image
@@ -134,6 +166,16 @@ def test_rgb_live_adapter_submits_without_depth_and_retries_pending_tf(tmp_path,
         image.header.stamp = node.get_clock().now().to_msg()
         node.on_rgb('wrist', image)
         assert not submitted and 'wrist' in node.pending_depth
+        if newer_rgb_arrives:
+            from copy import deepcopy
+            newer=deepcopy(image)
+            newer.header.stamp.nanosec+=100_000_000
+            if newer.header.stamp.nanosec>=1_000_000_000:
+                newer.header.stamp.sec+=1;newer.header.stamp.nanosec-=1_000_000_000
+            newer.data=bytes([40,50,60])*192
+            node.on_rgb('wrist',newer)
+            assert node.pending_depth['wrist'] is image
+            node.detector.segmenter=object()  # Require exact captured RGB evidence.
         node.tf.lookup_transform = lambda *args: SimpleNamespace(transform=SimpleNamespace(
             translation=SimpleNamespace(x=0.,y=0.,z=1.),
             rotation=SimpleNamespace(w=0.,x=1.,y=0.,z=0.)))
@@ -145,6 +187,43 @@ def test_rgb_live_adapter_submits_without_depth_and_retries_pending_tf(tmp_path,
     finally:
         if node is not None:
             node.destroy_node()
+        rclpy.try_shutdown()
+
+
+@pytest.mark.parametrize('offset,skew,accepted',[(.02,.05,True),(.2,.05,False),
+                                              (-2.,.05,False),(-.1,.05,False),(.02,0.,False)])
+def test_rgb_capture_timestamp_skew_is_bounded(tmp_path,monkeypatch,offset,skew,accepted):
+    from types import SimpleNamespace
+    from rclpy.time import Time
+    from sensor_msgs.msg import CameraInfo,Image
+    from phyai_discovery import Discovery
+    import phyai_discovery_ros.node as adapter
+    monkeypatch.setattr(adapter,'Discovery',lambda config:Discovery(
+        {**config,'detector':{},'segmentation':{'backend':'depth'}}))
+    config=dict(map_frame='world',use_overhead=False,viewpoints=['left'],
+        input_max_future_skew=skew,detector={'backend':'rgb'},
+        cameras={'wrist':{'rgb_topic':'/test/rgb','info_topic':'/test/info'}})
+    path=tmp_path/'rgb.json';path.write_text(json.dumps(config))
+    rclpy.init();node=None
+    try:
+        node=DiscoveryNode(parameter_overrides=[Parameter('config_path',value=str(path))])
+        node.capture_service(Trigger.Request(),Trigger.Response())
+        now=time.monotonic();node.stationarity.update([0.]*7,now-.6);node.stationarity.update([0.]*7,now)
+        node.discovery.tick(now,stationary=True)
+        node.request_stamp=100.
+        monkeypatch.setattr(node,'get_clock',lambda:SimpleNamespace(now=lambda:Time(seconds=100.)))
+        info=CameraInfo(width=16,height=12,k=[20.,0.,7.5,0.,20.,5.5,0.,0.,1.])
+        info.header.frame_id='wrist_optical';node.on_info('wrist',info)
+        node.tf.lookup_transform=lambda *_:SimpleNamespace(transform=SimpleNamespace(
+            translation=SimpleNamespace(x=0.,y=0.,z=1.),rotation=SimpleNamespace(w=0.,x=1.,y=0.,z=0.)))
+        submitted=[];node.submit=submitted.append
+        image=Image(width=16,height=12,encoding='rgb8',step=48,data=bytes([100])*576)
+        image.header.frame_id='wrist_optical';image.header.stamp=Time(seconds=100.+offset).to_msg()
+        node.on_rgb('wrist',image)
+        assert bool(submitted)==accepted
+        if not accepted:assert 'age=' in node.last_error
+    finally:
+        if node is not None:node.destroy_node()
         rclpy.try_shutdown()
 
 

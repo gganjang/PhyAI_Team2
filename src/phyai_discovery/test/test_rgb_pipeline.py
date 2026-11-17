@@ -57,6 +57,24 @@ def test_rgb_capture_does_not_silently_select_the_depth_backend():
     assert not result.candidates
 
 
+def test_raw_mask_crossing_table_edge_is_rejected_instead_of_clipped_into_a_block():
+    from types import SimpleNamespace
+    from phyai_discovery.rgb import RGBObserver,RGBFrame
+    transform=np.diag([1.,-1.,-1.,1.]);transform[2,3]=.5
+    edge=np.zeros((100,100),bool);edge[30:60,78:92]=True
+    inside=np.zeros((100,100),bool);inside[30:60,45:56]=True
+    observer=RGBObserver([.075,.025,.015],SimpleNamespace(propose=lambda _:[edge,inside]),
+        scope=[-.1,.1,-.1,.1],planar=True,table_polygon=[[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]])
+    frame=RGBFrame('wrist',1.,Intrinsics(100,100,200.,200.,49.5,49.5),
+                   transform,np.zeros((100,100,3),np.uint8),None)
+    observer.initialise(frame,[0.,0.])
+    rejected,accepted=observer.segmentation
+    assert .8<rejected['table_fraction']<.99
+    assert rejected['decision']=='outside_tabletop'
+    assert accepted['decision']=='selected'
+    assert len(observer.tracks)==1
+
+
 def test_rgb_detector_retains_distinct_static_views_and_reset_clears_them(monkeypatch):
     from dataclasses import replace
     detector = RGBDetector([.075, .025, .015], [0., 0.])
@@ -290,6 +308,25 @@ def test_sam_proposals_need_no_colour_contrast_or_distinct_appearance(colour):
     measured = sorted(observer.poses.values(), key=lambda p: p[0])
     assert measured[0][0] == pytest.approx(-.1, abs=.003)
     assert measured[1][0] == pytest.approx(.1, abs=.003)
+
+
+def test_round_hole_with_block_sized_area_is_not_a_block_proposal():
+    from types import SimpleNamespace
+    from phyai_discovery.rgb import RGBFrame, RGBObserver
+    transform=np.diag([1.,-1.,-1.,1.]);transform[2,3]=.5
+    rgb=np.full((240,320,3),100,dtype=np.uint8)
+    v,u=np.indices(rgb.shape[:2])
+    hole=(u-85)**2+(v-120)**2<=21**2
+    block=np.zeros_like(hole);block[110:131,195:257]=True
+    rgb[hole]=0
+    # Both masks have roughly the same pixel area; shape must distinguish them.
+    assert .9<np.count_nonzero(hole)/np.count_nonzero(block)<1.1
+    frame=RGBFrame('overhead',1.,Intrinsics(320,240,400.,400.,159.5,119.5),transform,rgb)
+    observer=RGBObserver([.075,.025,.015],SimpleNamespace(propose=lambda _: [hole,block]),planar=True)
+    observer.initialise(frame,[0.,0.])
+    assert len(observer.proposal_masks)==1
+    np.testing.assert_array_equal(next(iter(observer.proposal_masks.values())),block)
+    assert not np.any(observer.regions['objects']&hole)
 
 
 def test_nested_face_mask_cannot_displace_a_whole_block_silhouette():

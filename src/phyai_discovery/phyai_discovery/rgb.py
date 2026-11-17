@@ -9,6 +9,7 @@ import math
 import numpy as np
 
 from phyai_discovery.perception import components, rotation_quaternion
+from .geometry import inside_polygon,footprint_inside,outside_excluded_regions
 
 
 @dataclass(frozen=True)
@@ -135,13 +136,20 @@ class RGBObserver:
     min_brightness_ratio = 1.6  # also required, so dim-pixel noise is not contrast
 
     def __init__(self, size, segmenter=None, pixel_error=1., calibration_error=.0005,
-                 scope=(-1., 1., -1., 1.), planar=False):
+                 scope=(-1., 1., -1., 1.), planar=False, table_polygon=None,
+                 min_table_fraction=.99,excluded_regions=None):
         self.size = np.asarray(size)
         self.planar = planar
         self.segmenter = segmenter
         self.pixel_error = pixel_error
         self.calibration_error = calibration_error
         self.scope = scope
+        self.table_polygon=table_polygon
+        self.excluded_regions=excluded_regions or []
+        outside_excluded_regions(np.empty((0,2)),self.excluded_regions)
+        if not math.isfinite(min_table_fraction) or not 0<min_table_fraction<=1:
+            raise ValueError('min_table_fraction must be between zero and one.')
+        self.min_table_fraction=min_table_fraction
         self.vertices = np.array([[x, y, z] for x in (-1, 1)
                                   for y in (-1, 1) for z in (-1, 1)])*self.size/2
         self.tracks, self.appearances, self.poses = {}, {}, {}
@@ -150,6 +158,7 @@ class RGBObserver:
         self.diagnostics = {}
         self.regions = None
         self.table_points = None
+        self.segmentation=[]
 
     def polygon(self, frame, pose):
         return hull(project(frame, self.vertices @ rotation(pose[3:]).T+pose[:3]))
@@ -175,6 +184,8 @@ class RGBObserver:
             in_scope &= ((distance > 0) & np.isfinite(distance)
                          & (world[:, :, 0] > xmin) & (world[:, :, 0] < xmax)
                          & (world[:, :, 1] > ymin) & (world[:, :, 1] < ymax))
+            in_scope &= inside_polygon(world[:,:,:2],self.table_polygon)
+        self.table_region=in_scope.copy()
         if frame.mask is not None:
             in_scope &= ~frame.mask
         return world, in_scope
@@ -235,12 +246,14 @@ class RGBObserver:
         return masks
 
     def segmented_blocks(self, frame, world, in_scope):
-        """Select SAM2 instance masks that are one known block, by geometry only.
+        """Select size/shape-compatible proposals; SAM2 does not classify blocks.
 
         A block segment lies almost entirely on the visible tabletop and covers
         about the image area of one block at its back-projected position and
         yaw. Table tiles are far larger; robot parts fall in the robot mask;
-        seams are thin. Object-sized segments of the wrong shape (touching
+        seams are thin. A drawing or a similarly sized device part can still
+        pass these image checks; proposals are not confirmed object identities.
+        Object-sized segments of the wrong shape (touching
         blocks, unknown objects) are reported as unexplained, never as blocks.
         """
         length, width, height = self.size
@@ -249,19 +262,44 @@ class RGBObserver:
         unknown = np.zeros_like(in_scope)
         border = np.zeros_like(in_scope)
         border[:2], border[-2:], border[:, :2], border[:, -2:] = True, True, True, True
-        for mask in self.segmenter.propose(frame.rgb):
+        masks=self.segmenter.propose(frame.rgb)
+        metadata=getattr(self.segmenter,'proposal_metadata',[])
+        self.segmentation=[{'index':i,'mask':np.asarray(mask,dtype=bool),'decision':'unprocessed',
+                           **(metadata[i] if i<len(metadata) else {})}
+                           for i,mask in enumerate(masks)]
+        for entry in self.segmentation:
+            mask=entry['mask']
             visible = mask & in_scope
             count = np.count_nonzero(visible)
+            entry.update(pixel_count=int(np.count_nonzero(mask)),visible_pixels=int(count))
+            table_count=int(np.count_nonzero(mask & getattr(self,'table_region',in_scope)))
+            entry['table_fraction']=table_count/max(entry['pixel_count'],1)
+            if entry['table_fraction']<self.min_table_fraction:
+                entry['decision']='outside_tabletop'
+                continue
             if count < 30:
+                entry['decision']='off_table_or_tiny'
                 continue  # robot or off-table
             v, u = np.nonzero(visible)
             xy = world[v, u, :2]
             centre = xy.mean(axis=0)
             _, _, axes = np.linalg.svd(xy[::max(1, len(xy)//2000)]-centre, full_matrices=False)
             extents = np.ptp((xy-centre) @ axes.T, axis=0)
+            entry.update(centre_m=centre.tolist(),extents_m=extents.tolist())
             if extents[0] > 4*length or extents[1] < width/2:
+                entry['decision']='table_region_or_seam'
                 continue  # tabletop region, or a seam/edge
+            if extents[0] < .65*length:
+                entry['decision']='small_geometry'
+                continue  # Small holes/fasteners cannot be a full known-length block.
+            if extents[0] < 1.5*extents[1]:
+                entry['decision']='non_elongated'
+                # Round/square segments can pass projected area alone. Keep
+                # their pixels unknown rather than creating elongated-block IDs.
+                unknown |= visible
+                continue
             if count < .8*np.count_nonzero(mask) or (mask & border).any():
+                entry['decision']='clipped_or_occluded'
                 # Cut by the robot mask, table edge or image border: this view
                 # cannot tell one block from a fragment. Leave it unknown (not
                 # table, not an object) for another view to settle.
@@ -270,6 +308,7 @@ class RGBObserver:
             pieces = components(np.column_stack((u, v)), 1.)
             piece = max(pieces, key=len)
             if len(piece) < .9*count:
+                entry['decision']='disconnected'
                 unexplained |= visible
                 continue
             # Disconnected prediction speckles are not part of this instance.
@@ -283,26 +322,35 @@ class RGBObserver:
             x, y = outline[:, 0], outline[:, 1]
             expected = .5*abs(np.dot(x, np.roll(y, 1))-np.dot(y, np.roll(x, 1)))
             ratio = count/max(expected, 1.)
+            entry['area_ratio']=float(ratio)
             if not .5 <= ratio <= 1.6:
+                entry['decision']='wrong_projected_area'
                 unexplained |= visible
                 continue
-            candidates.append((abs(math.log(ratio)), visible))
+            entry['decision']='selected'
+            entry['used_mask']=visible
+            candidates.append((abs(math.log(ratio)), visible,entry))
         kept = []
+        kept_entries=[]
         # Prefer a whole-object mask over a nested face. Projected-area ranking
         # alone can select a lit top face and suppress the complete silhouette.
         # The cuboid fit still validates the resulting outline; larger masks
         # already passed the one-block geometry/area gates above.
-        for _, mask in sorted(candidates, key=lambda item: item[0]):
+        for _, mask,entry in sorted(candidates, key=lambda item: item[0]):
             area = np.count_nonzero(mask)
             for index, old in enumerate(kept):
                 old_area = np.count_nonzero(old)
                 overlap = np.count_nonzero(mask & old)
                 if overlap > .3*min(area, old_area):
                     if overlap >= .9*min(area, old_area) and area > old_area:
+                        kept_entries[index]['decision']='overlap_suppressed'
                         kept[index] = mask
+                        kept_entries[index]=entry
+                    else:entry['decision']='overlap_suppressed'
                     break
             else:
                 kept.append(mask)
+                kept_entries.append(entry)
         objects = np.any(kept, axis=0) if kept else np.zeros_like(in_scope)
         self.regions = dict(objects=objects, unexplained=unexplained & ~objects,
                             unknown=unknown & ~objects)
@@ -317,6 +365,7 @@ class RGBObserver:
         k = frame.intrinsics
         world, in_scope = self.tabletop(frame)
         self.regions = None
+        self.segmentation=[]
         if self.segmenter is not None and hasattr(self.segmenter, 'propose'):
             masks = self.segmented_blocks(frame, world, in_scope)
         else:
@@ -536,9 +585,41 @@ class RGBDetector:
         old = self.observer
         self.observer = RGBObserver(old.size, self.segmenter, pixel_error=old.pixel_error,
                                     calibration_error=old.calibration_error, scope=old.scope,
-                                    planar=old.planar)
+                                    planar=old.planar,table_polygon=old.table_polygon,
+                                    min_table_fraction=old.min_table_fraction,excluded_regions=old.excluded_regions)
         self.proposals = []
         self.views = []
+
+    def inspection_evidence(self,capture,frame,candidates):
+        target=capture.inspection_target
+        if not target:return None
+        position=np.asarray(target['position'])
+        if any(np.linalg.norm(np.asarray(c.position)[:2]-position[:2])<.06 for c in candidates):
+            return None  # Missing precision is not evidence that an object is absent.
+        radius=float(np.linalg.norm(target['size'][:2])/2)
+        corners=position+np.array([[x,y,z] for x in (-radius,radius)
+                                  for y in (-radius,radius) for z in (-.0075,.0075)])
+        optical=(corners-frame.camera_to_map[:3,3])@frame.camera_to_map[:3,:3]
+        if np.any(optical[:,2]<.05):return None
+        uv=project(frame,corners)
+        low=np.floor(uv.min(axis=0)).astype(int);high=np.ceil(uv.max(axis=0)).astype(int)
+        width,height=frame.intrinsics.width,frame.intrinsics.height
+        if min(low)<4 or high[0]>=width-4 or high[1]>=height-4:return None
+        x0,y0=low;x1,y1=high
+        if (x1-x0)*(y1-y0)<500:return None
+        if frame.mask is not None and frame.mask[y0:y1+1,x0:x1+1].any():return None
+        wrong=[segment for segment in self.observer.segmentation
+               if segment['decision'] in ('small_geometry','non_elongated')
+               and segment['visible_pixels']>=.9*segment['pixel_count']
+               and not (segment['mask'][0].any() or segment['mask'][-1].any()
+                        or segment['mask'][:,0].any() or segment['mask'][:,-1].any())
+               and np.linalg.norm(np.asarray(segment['centre_m'])-position[:2])<.02]
+        if not wrong:return None
+        return {'candidate_id':target['candidate_id'],'verdict':'non_block_shape',
+                'camera_position':frame.camera_to_map[:3,3].tolist(),
+                'camera_axis':frame.camera_to_map[:3,2].tolist(),
+                'camera':capture.camera,'viewpoint':capture.viewpoint,'stamp':capture.stamp,
+                'reason':'Visible close-up segment has incompatible known-block dimensions or aspect ratio.'}
 
     def detect(self, capture):
         from .perception import Candidate, Detection
@@ -560,6 +641,18 @@ class RGBDetector:
             position = np.asarray(proposal['position_m'])
             colour = observer.appearances[name].copy()
             mask = observer.proposal_masks[name]
+            def on_table(estimate):
+                if not outside_excluded_regions(estimate['position_m'][:2],observer.excluded_regions):
+                    for segment in observer.segmentation:
+                        if segment.get('used_mask') is mask:segment['decision']='excluded_search_region'
+                    return False
+                valid=footprint_inside(estimate['position_m'],observer.size,
+                    estimate['quaternion_wxyz'],scope=observer.scope,polygon=observer.table_polygon)
+                if not valid:
+                    for segment in observer.segmentation:
+                        if segment.get('used_mask') is mask:segment['decision']='outside_table_footprint'
+                return valid
+            if not on_table(proposal):continue
             proposals.append((position, colour))
             complete = complete_silhouette(mask, frame.mask)
             views = [(frame, mask)] if complete else []
@@ -582,6 +675,7 @@ class RGBDetector:
                 # face matching the table); it must not veto this clean view.
                 fitted = observer.fit(name, views[:1])
             estimate = fitted or proposal
+            if not on_table(estimate):continue
             if complete and not seed_only:
                 current.append((position, colour, mask.copy()))
             bound = estimate['position_uncertainty_m']
@@ -612,11 +706,13 @@ class RGBDetector:
         if distinct and not seed_only:
             history.append((frame, current))
         empty = np.empty((0, 3))
+        inspection=self.inspection_evidence(capture,frame,candidates)
         if not self.table_coverage:
             return Detection(capture.camera, capture.stamp, capture.map_frame,
                              capture.calibration_revision, capture.viewpoint, None,
                              empty, empty, empty, candidates,
-                             ['RGB-only discovery does not certify table coverage or grasp readiness.'])
+                             ['RGB-only discovery does not certify table coverage or grasp readiness.'],
+                             inspection_evidence=inspection)
         regions = observer.regions
         surface = regions['in_scope'] & ~regions['objects'] & ~regions['unexplained'] & ~regions['unknown']
         top = regions['top']
@@ -635,7 +731,7 @@ class RGBDetector:
                          top[regions['objects'] & sparse], empty, candidates,
                          ['RGB-only discovery: table plane is the configured installation plane; '
                           'coverage is visible tabletop outside object segments.'],
-                         top[regions['unexplained'] & sparse])
+                         top[regions['unexplained'] & sparse],inspection_evidence=inspection)
 
     def seed_runtime(self, observer, tracks):
         """Freeze shared discovery identities in the continuous RGB observer."""

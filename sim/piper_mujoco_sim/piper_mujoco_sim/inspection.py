@@ -24,7 +24,14 @@ def scan_geometry(model):
 
 class InspectionPlanner:
     def __init__(self, model, survey_targets, max_views_per_block=2, *,
-                 min_camera_height=.24, allow_inverted=False, min_downward_cosine=.3, gripper=0., rgb_mask_clearance=False):
+                 min_camera_height=.24, allow_inverted=False, min_downward_cosine=.3, gripper=0., rgb_mask_clearance=False,
+                 fixed_wrist_roll=True, sample_count=3000, motion_preferences=None, allow_reposition=False):
+        self.allow_reposition=allow_reposition
+        self.motion_preferences=dict(motion_preferences or {})
+        allowed={'max_camera_rotation','max_wrist_joint_change','joint_travel_weight','camera_rotation_weight'}
+        if (set(self.motion_preferences)-allowed or any(isinstance(v,bool) or not math.isfinite(v) or v<=0
+                for v in self.motion_preferences.values())):
+            raise ValueError('Inspection motion preferences require known positive finite bounds/weights.')
         if max_views_per_block is not None and (not isinstance(max_views_per_block,int)
                 or isinstance(max_views_per_block,bool) or max_views_per_block<1):
             raise ValueError('Per-object inspection budget must be a positive integer.')
@@ -40,6 +47,10 @@ class InspectionPlanner:
         self.min_downward_cosine=float(min_downward_cosine)
         self.min_camera_height = float(min_camera_height)
         self.allow_inverted = bool(allow_inverted)
+        self.fixed_wrist_roll = bool(fixed_wrist_roll)
+        if not isinstance(sample_count,int) or isinstance(sample_count,bool) or sample_count<1:
+            raise ValueError('Planner sample count must be a positive integer.')
+        self.sample_count=sample_count
         self.model = copy.copy(model)
         self.data = mujoco.MjData(self.model)
         self.addresses = [model.joint(f'joint{i}').qposadr[0] for i in range(1, 7)]
@@ -77,7 +88,7 @@ class InspectionPlanner:
         self.model.geom('mount_post').pos[:] = geometry['post_position']
         self.geometry = copy.deepcopy(geometry)
         self.reset()
-        self._build_pool(gripper=self.gripper)
+        self._build_pool(sample_count=self.sample_count,gripper=self.gripper)
 
     def reset(self):
         self.history = {}
@@ -105,7 +116,8 @@ class InspectionPlanner:
         joints = np.unique(np.clip(np.vstack(samples), self.limits[:, 0], self.limits[:, 1]), axis=0)
         self.pool, self.positions, self.rotations = [], [], []
         for q in joints:
-            q[5] = 0  # joint6 rolls the gripper, not the fixed camera on link5
+            if self.fixed_wrist_roll:
+                q[5] = 0  # Simulator camera is attached before joint6.
             p, r = self.pose([*q,gripper])
             if (self.min_camera_height < p[2] < .85 and r[2, 2] > self.min_downward_cosine
                     and (self.allow_inverted or r[2, 1] > .15)):
@@ -168,15 +180,47 @@ class InspectionPlanner:
                 return False
         return True
 
-    def choose(self, targets, current, label):
+    def _reposition_route(self,current,target,keepout=None):
+        """Subdivide a checked signed-joint path; never wrap across cable limits."""
+        for steps in (2,4,8,16,32):
+            previous=list(current);_,old_rotation=self.pose(previous)
+            route=[]
+            for index in range(1,steps+1):
+                q=(np.asarray(current)+(np.asarray(target)-current)*index/steps).tolist()
+                q[:6]=np.clip(q[:6],self.limits[:,0],self.limits[:,1]).tolist()
+                if index==steps:q=list(target)
+                _,rotation=self.pose(q)
+                angle=math.acos(float(np.clip((np.trace(old_rotation.T@rotation)-1)/2,-1,1)))
+                wrist=float(np.max(np.abs(np.asarray(q[3:6])-previous[3:6])))
+                if (angle>self.motion_preferences.get('max_camera_rotation',math.inf)
+                        or wrist>self.motion_preferences.get('max_wrist_joint_change',math.inf)):
+                    break
+                route.append(q);previous=q;old_rotation=rotation
+            else:
+                previous=list(current)
+                for q in route:
+                    if not self._clear_path(previous,q) or not self._clear_obstacles(previous,q,keepout):
+                        return None
+                    previous=q
+                return route
+        return None
+
+    def choose(self, targets, current, label, *, _reposition=False):
         """Return a clear novel view of a detected uncertain object, or None."""
         self.last_rejections = {'budget': 0, 'in_frame': 0, 'novel': 0,
-                                'occluded': 0, 'path_blocked': 0, 'measured_obstacle': 0}
+                                'occluded': 0, 'path_blocked': 0, 'measured_obstacle': 0,
+                                'reorientation':0}
         self.last_failure = None
         if not targets or not len(self.pool):
             self.last_failure = 'No targets or candidate camera poses'
             return None
         f = 240/(2*math.tan(math.radians(float(self.model.cam_fovy[self.camera]))/2))
+        _,current_rotation=self.pose(current)
+        traces=np.einsum('nij,ij->n',self.rotations,current_rotation)
+        camera_angles=np.arccos(np.clip((traces-1)/2,-1.,1.))
+        wrist_change=np.max(np.abs(self.pool[:,3:6]-np.asarray(current[3:6])),axis=1)
+        gentle=(camera_angles<=self.motion_preferences.get('max_camera_rotation',math.inf))
+        gentle&=wrist_change<=self.motion_preferences.get('max_wrist_joint_change',math.inf)
         possibilities = []
         for target in targets:
             attempts = self.attempts.get(target['id'],0)
@@ -193,6 +237,8 @@ class InspectionPlanner:
             novelty = np.ones(len(self.pool))
             diversity = np.zeros(len(self.pool), dtype=int)
             self.last_rejections['in_frame'] += int(visible.sum())
+            self.last_rejections['reorientation']+=int((visible & ~gentle).sum())
+            if not _reposition:visible &= gentle
             # Physical camera poses, not just new labels, establish novelty.
             for old_p, old_r in self.history.values():
                 separation = np.linalg.norm(self.positions-old_p, axis=1)
@@ -209,7 +255,9 @@ class InspectionPlanner:
             pixel_area = f*f*area*self.rotations[:, 2, 2]/np.maximum(depth, .15)**2
             centring = np.sum((local[:, :2]/np.maximum(depth[:, None], .15))**2, axis=1)
             travel = np.max(abs(self.pool[:, :6]-np.asarray(current[:6])), axis=1)
-            score = np.sqrt(pixel_area)*novelty - 12*centring - 2*travel
+            score = (np.sqrt(pixel_area)*novelty - 12*centring
+                     - self.motion_preferences.get('joint_travel_weight',2)*travel
+                     - self.motion_preferences.get('camera_rotation_weight',0)*camera_angles)
             shortlist = 40
             ranked = np.lexsort((np.where(visible, score, -np.inf),
                                  np.where(visible, diversity, -1)))
@@ -231,24 +279,36 @@ class InspectionPlanner:
                 if not self._clear_obstacles(current, q, target.get('keepout')):
                     self.last_rejections['measured_obstacle'] += 1
                     continue
+                route=[]
+                if _reposition:
+                    route=self._reposition_route(current,q,target.get('keepout'))
+                    if route is None:
+                        self.last_rejections['path_blocked']+=1
+                        continue
                 self.remember(label, q)
                 self.attempts[target['id']] = self.attempts.get(target['id'],0)+1
                 return {'joints': q, 'focus': target['id'], 'position': target['position'], 'keepout': target.get('keepout'),
                         'reason': 'New close view of uncertain detected object', 'score': score,
                         'diversity_rank': diversity_rank,
                         'view_coverage': self.view_coverage(target['position']),
-                        'unresolved_checks': target.get('unresolved_checks',[])}
+                        'unresolved_checks': target.get('unresolved_checks',[]),
+                        'waypoints':route}
             self.last_rejections['path_blocked'] += 1
+        if self.allow_reposition and not _reposition:
+            return self.choose(targets,current,label,_reposition=True)
         if self.last_rejections['budget'] == len(targets):
             self.last_failure = 'Per-object inspection budget exhausted'
         elif not self.last_rejections['in_frame']:
             self.last_failure = 'No candidate contains the target in the camera field of view'
+        elif self.last_rejections['reorientation']==self.last_rejections['in_frame']:
+            self.last_failure = 'No candidate meets the inspection reorientation limits'
         elif not self.last_rejections['novel']:
             self.last_failure = 'No sufficiently different camera view remains'
         else:
             self.last_failure = (f"Candidate views rejected: {self.last_rejections['occluded']} occluded, "
                                  f"{self.last_rejections['path_blocked']} with blocked paths, "
-                                 f"{self.last_rejections['measured_obstacle']} crossing measured object keepouts")
+                                 f"{self.last_rejections['measured_obstacle']} crossing measured object keepouts, "
+                                 f"{self.last_rejections['reorientation']} exceeding reorientation limits")
         return None
 
     def _outside_robot_mask(self, joints, point, radius):

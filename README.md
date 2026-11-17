@@ -81,9 +81,8 @@ ros2 run piper_mujoco_sim scatter_blocks scatter --seed 7
 ros2 run piper_mujoco_sim scatter_blocks reset
 ```
 
-The lab scene uses the longer lab PIPER arm (338 mm upper arm, 322 mm forearm) through
-`arm_geometry`. See the [arm geometry details](docs/development.md#lab-scene-and-camera-views),
-including the Isaac simulator limitation.
+The lab scene uses the official PiPER-L model with its original link frames and meshes.
+See the [model details](docs/development.md#lab-scene-and-camera-views).
 
 App structure, dependencies, and simulator details: [development reference](docs/development.md).
 
@@ -93,15 +92,18 @@ Start the host separately: either MuJoCo or the control PC's bridge, camera
 drivers, and calibrated TF. Discovery uses the configured ROS interfaces in both cases.
 
 ```bash
-bash scripts/run_discovery.sh     # uses the included default config; observation + viewer
+bash scripts/run_discovery.sh     # RGB discovery, automatic survey, and viewer
 ```
 
 Open **http://localhost:23518** for the workspace, candidates, inventory, and live
-wrist/overhead previews. The viewer is on by default; automatic arm motion is off.
+wrist/overhead previews. The viewer and automatic survey are on by default.
+Use `-- auto_scan:=false` for observation without arm motion.
 The launcher sources ROS and the workspace, and builds missing discovery packages
-before preparing SAM2. After pulling changes, use `bash scripts/run_discovery.sh --build`
+before preparing the configured model. After pulling changes, use `bash scripts/run_discovery.sh --build`
 to rebuild. Set `PHYAI_WS=/path/to/workspace` for another workspace. Standalone
-checkouts use `.discovery-ros/`. SAM2 dependencies and weights are cached afterward.
+checkouts use `.discovery-ros/`. Model dependencies and weights are cached afterward. The hardware default is SAM 3.1; authenticate locally to download its gated checkpoint.
+[SAM 3.1 setup](src/phyai_discovery_ros/README.md#sam-31-segmentation)
+and the optional YOLO stock-checkpoint replay are documented with the model workflow.
 
 **`--config` is optional.** The launcher automatically uses the included
 `src/phyai_discovery_ros/config/discovery.json`. Configure the installation once;
@@ -110,20 +112,28 @@ to override that default, for example for the separate simulation test.
 
 | Config in `src/phyai_discovery_ros/config/` | Purpose |
 |---|---|
-| [discovery.json](src/phyai_discovery_ros/config/discovery.json) | Launcher default; observation, no fixed-pose scan section |
+| [discovery.json](src/phyai_discovery_ros/config/discovery.json) | RGB/SAM 3.1 hardware default; generated lab survey and candidate-focused geometry planner |
 | [discovery_rgb.json](src/phyai_discovery_ros/config/discovery_rgb.json) | RGB discovery and candidate-focus integration template |
 | [piper_scan.example.json](src/phyai_discovery_ros/config/piper_scan.example.json) | Fixed-pose scan template with targets and joint limits; adapt and validate for hardware |
 | [mujoco_interface.json](src/phyai_discovery_ros/config/mujoco_interface.json) | Standalone simulation template; wrapper syncs the current survey and inspection policy at launch |
 
-**Current limitation:** the default config has no fixed-pose scan section.
-To command motion today, supply a scan-enabled installation config:
+The default uses the shared simulator planning code with host joint frames,
+limits and calibrated cameras: an overhead proposal capture, twenty fixed-posture
+cobra views, then close inspection of unresolved candidates. The optional near-post
+pass is disabled after shaking was observed during its first transition. The full
+tabletop remains visible, with coverage gaps marked as unobserved. Inspection uses
+slow, jerk-limited motion and preserves consistent pose evidence when later views
+conflict. The controller uses measured feedback and bridge safeguards for the initial
+approach; changes have offline coverage, geometry and motion tests, not live-arm
+validation.
+For a different installation, supply its scan configuration:
 
 ```bash
 bash scripts/run_discovery.sh --config /path/scan-enabled.json -- auto_scan:=true
 ```
 
 That config needs `scan.targets` and `scan.joint_limits`. Candidate-directed
-scanning needs a robot `plan_view` adapter as well.
+scanning needs a configured geometry planner or a robot `plan_view` adapter.
 [Configuration and ROS integration guide](src/phyai_discovery_ros/README.md).
 
 ## 4. App-integrated discovery
@@ -163,7 +173,7 @@ bash scripts/run_discovery_sim.sh
 ```
 
 `run_discovery_sim.sh` copies the current survey from `apps/junh/config/mujoco.json`
-on every launch (currently 17 poses) and checks saved scene geometry. After the
+on every launch and checks saved scene geometry. After the
 survey, it takes focused views of unresolved measured candidates using the
 configured robot/camera geometry planner and the same public ROS interfaces.
 Both scripts default to **ROS domain 142**. Look for arm movement, live camera images,
@@ -200,8 +210,24 @@ and the one-person-at-a-time lock.
 ## Tests and deployment
 
 ```bash
-bash scripts/test.sh viewer      # focused automated checks; also: ros, scan, scene
+bash scripts/test.sh --list                    # group descriptions; runs nothing
+bash scripts/test.sh sweep                     # geometry, compact sweep and survey-only stop
+bash scripts/test.sh candidates                # association, focus and negative evidence
+bash scripts/test.sh diagnostics               # saved masks/reports and viewer endpoints
+bash scripts/test.sh motion                    # ROS scan timing, arrival and faults
+bash scripts/test.sh transport                 # ROS images/TF and discovery services
+bash scripts/test.sh setup                     # launcher/provisioning checks
+bash scripts/test.sh sweep diagnostics --dry-run # inspect selection without running it
 ```
+
+Choose the groups affected by the change; combine them in one command to avoid
+repeating checks. Overlapping file/directory selections are deduplicated. No
+arguments show help; the full suite runs only with `bash scripts/test.sh all`.
+The `segmentation` group checks model protocols, class labels and setup without weights.
+Existing `rgb`, `depth`, `discovery`, `ros`, `scan`, `scene`, `viewer`, and `sam2`
+groups remain available. `sam2` requires the configured test checkpoint.
+ROS tests use domain 173, independently of the host bridge domain; override it
+with `PHYAI_TEST_ROS_DOMAIN_ID` for a separate test environment.
 
 From the **development PC host shell**, build and transfer an app image:
 

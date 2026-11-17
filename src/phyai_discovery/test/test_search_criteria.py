@@ -12,7 +12,8 @@ BLOCKS=[(.1,0.,.075,.025,.015,0.)]
 
 def test_inspection_targets_exclude_satisfied_blocks_and_prioritize_hypotheses():
     tracks=[{'id':'good','position':[.1,0,.01],'size':[.075,.025,.015],'resolved':True},
-            {'id':'weak','position':[.2,0,.01],'size':[.075,.025,.015],'resolved':True},
+            {'id':'weak','position':[.2,0,.01],'size':[.075,.025,.015],'resolved':True,
+             'quaternion':[.70710678,0.,0.,.70710678]},
             {'id':None,'hypothesis_id':'new','position':[.3,0,.01],
              'size':[.075,.025,.015],'resolved':False}]
     report={'blocks':[{'id':'good','meets_criteria':True},
@@ -21,6 +22,7 @@ def test_inspection_targets_exclude_satisfied_blocks_and_prioritize_hypotheses()
     assert [t['id'] for t in targets]==['weak','new']
     assert targets[1]['priority']>targets[0]['priority']
     assert targets[0]['position']==tracks[1]['position']
+    assert targets[0]['quaternion']==tracks[1]['quaternion']
 
 
 def accept(search, detector, camera, stamp, viewpoint):

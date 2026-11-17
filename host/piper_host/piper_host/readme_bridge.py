@@ -48,7 +48,9 @@ class ReadmeBridge(Node):
             overhead_source='cam2', wrist_source='cam1',
             world_frame='world', base_frame='base_link', flange_frame='link6',
             end_pose_in_flange=[-0.01766, 0.00005, 0.01516],
-            calibration_file='~/piper_test/data/calib/calibration.json').items()}
+            calibration_file='~/piper_test/data/calib/calibration.json',
+            # 테이블 좌표 원점 (world). 없으면 world = base_link. 캘리브레이션과 별개 (~/piper_test/tools/set_table_origin.py)
+            table_frame_file='~/piper_test/data/calib/table_frame.json').items()}
         self.p = p
         self.last_state = None        # 슬레이브 현재 [j1..j6, 폭]
         self.last_cmd = None          # 마지막 목표 [j1..j6, 폭] — 일부 관절만 온 명령은 나머지를 여기서 채움 (시뮬레이터와 같은 동작)
@@ -136,7 +138,16 @@ class ReadmeBridge(Node):
 
     def publish_static_tf(self):
         p, now = self.p, self.get_clock().now().to_msg()
-        tfs = [_tf(np.eye(4), p['world_frame'], p['base_frame'], now)]
+        T_world_base = np.eye(4)                     # world = 테이블 원점. 파일의 T_base_table 의 역
+        table = os.path.expanduser(p['table_frame_file'])
+        if os.path.exists(table):
+            try:
+                with open(table) as f:
+                    T_world_base = np.linalg.inv(np.array(json.load(f)['T_base_table']))
+                self.get_logger().info(f'world = 테이블 원점 ({table})')
+            except (OSError, ValueError, KeyError) as e:
+                self.get_logger().warning(f'테이블 원점 파일을 읽지 못함 ({e}) → world = {p["base_frame"]}')
+        tfs = [_tf(T_world_base, p['world_frame'], p['base_frame'], now)]
         path = os.path.expanduser(p['calibration_file'])
         try:
             with open(path) as f:

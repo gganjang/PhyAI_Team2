@@ -237,7 +237,10 @@ def test_slow_pose_drift_is_checked_against_all_supporting_views():
     for stamp, dx in [(2., .006), (3., .012), (4., .018)]:
         workspace.merge(another_view(first, stamp, str(stamp), dx))
     assert not workspace.tracks[0]['resolved']
-    assert len(workspace.tracks[0]['supporting_views']) == 1
+    # Retain the independent anchors that exposed the drift, rather than
+    # replacing their consensus with the newest conflicting measurement.
+    assert len(workspace.tracks[0]['supporting_views']) == 3
+    assert workspace.tracks[0]['position'][0] == pytest.approx(first.candidates[0].position[0]+.006)
     assert not SearchCriteria().assess(workspace.snapshot())['met']
 
 

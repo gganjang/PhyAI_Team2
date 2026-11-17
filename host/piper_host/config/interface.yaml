@@ -10,10 +10,13 @@ readme_bridge:
     overhead_source: cam2                           # 천장 고정
     wrist_source: cam1                              # 슬레이브 손목
     # 좌표계
-    world_frame: world                              # 실제 작업대 원점은 안 쟀음 → base_link 와 같은 위치로 둠
+    world_frame: world                              # 테이블 원점: table_frame_file 이 있으면 그 점, 없으면 base_link 와 같은 위치
+    table_frame_file: ~/piper_test/data/calib/table_frame.json   # ~/piper_test/tools/set_table_origin.py 로 고름 (캘리브레이션과 별개)
     base_frame: base_link                           # = 드라이버 end_pose 기준 (URDF FK 와 0.05 mm 이내)
     flange_frame: link6                             # URDF 손목 끝 링크
-    # 펌웨어 end_pose 는 link6 이 아니라 link6 기준 이 위치(m, 회전 없음)의 점이다 (2026-10-22 실측: 슬레이브 (-17.7, 0.05, 15.2) mm,
-    # 마스터 (-16.6, 0.9, 16.9) mm, 방향 차 0.02° 이하). 손목 카메라 캘리브레이션은 end_pose 기준이라 이만큼 옮겨 붙인다.
-    end_pose_in_flange: [-0.01766, 0.00005, 0.01516]
+    # 펌웨어 end_pose 는 link6 기준 이 위치(m, 회전 없음)의 점이다. URDF 는 PIPER-L (launch/host.launch.py).
+    # 2026-11-13 PIPER-L FK 로 재측정: 슬레이브 (0.84, -0.01, 5.70) mm, 방향 차 0.02° — 한 자세뿐이라 임시값.
+    #   손목 카메라 캘리브레이션은 end_pose 기준이라 이만큼 옮겨 붙인다. 여러 자세로 다시 재기: ~/piper_test/tools/measure_end_pose_offset.py
+    # (이전 값 (-17.66, 0.05, 15.16) mm 은 표준 PIPER URDF 로 잰 것 — 모델이 달라 생긴 차이였다)
+    end_pose_in_flange: [0.00084, -0.00001, 0.00570]
     calibration_file: ~/piper_test/data/calib/calibration.json

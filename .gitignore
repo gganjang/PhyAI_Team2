@@ -13,3 +13,13 @@ apps/junh/.sam2-runtime/
 
 # Local ROS workspace for discovery checkouts outside a colcon src directory
 .discovery-ros/
+.discovery-reports/
+
+# Isolated SAM 3.1 interpreter and gated model weights
+.discovery-sam31/
+
+# YOLO26 model runtime and public weights
+.discovery-yolo26/
+
+# Local model checkpoints
+/checkpoints/*.pt

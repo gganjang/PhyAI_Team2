@@ -1,4 +1,4 @@
-"""Prompted SAM 2 masks from measured RGB-D; model loaded once per detector."""
+"""Segmentation backends; model runtimes are loaded once per detector."""
 from pathlib import Path
 import os
 
@@ -83,6 +83,12 @@ class SAM2Segmenter:
 def make_segmenter(config):
     if not config or config.get('backend', 'depth') == 'depth':
         return None
+    if config.get('backend') == 'yolo26n-seg':
+        from .yolo26 import YOLO26Segmenter
+        return YOLO26Segmenter(config)
+    if config.get('backend') == 'sam3.1':
+        from .sam31 import SAM31Segmenter
+        return SAM31Segmenter(config)
     if config.get('backend') != 'sam2':
         raise ValueError('Unknown segmentation backend.')
     checkpoint=config.get('checkpoint') or os.environ.get('PHYAI_SAM2_CHECKPOINT')

@@ -20,6 +20,13 @@ from phyai_discovery_ros.node import DiscoveryNode
 
 def test_service_gates_inventory_filters_ids_and_rejects_old_sessions(tmp_path):
     cfg=json.loads((Path(__file__).parents[1]/'config/discovery.json').read_text())
+    cfg.update(detector={'known_block_size':[.075,.025,.015]},
+               segmentation={'backend':'depth'},scope=None)
+    for key in ('view_planner','candidate_focus','inspection_rounds','search_criteria','report_directory','excluded_regions'):
+        cfg.pop(key,None)
+    for camera,camera_cfg in cfg['cameras'].items():
+        camera_cfg['depth_topic']=f'/{camera}/depth/image_rect_raw'
+        camera_cfg['info_topic']=f'/{camera}/depth/camera_info'
     cfg['viewpoints']=['side']
     path=tmp_path/'discovery.json';path.write_text(json.dumps(cfg))
     rclpy.init();nodes=[];executor=SingleThreadedExecutor()
@@ -42,7 +49,7 @@ def test_service_gates_inventory_filters_ids_and_rejects_old_sessions(tmp_path):
         depth[(abs((u-79.5)/240*.985)<=.0375)&(abs((v-59.5)/240*.985)<=.0125)]=.985
         transform=np.diag([1.,-1.,-1.,1.]);transform[2,3]=1.
         def capture(camera,view,stamp):
-            return Capture(camera,stamp,camera+'_optical','base_link','test',
+            return Capture(camera,stamp,camera+'_optical',cfg['map_frame'],'test',
                            Intrinsics(160,120,240.,240.,79.5,59.5),depth,transform,view)
         discovery.discovery.process(capture('overhead','overhead',1.),stationary=True)
         discovery.discovery.request_capture(time.monotonic())
@@ -54,7 +61,7 @@ def test_service_gates_inventory_filters_ids_and_rejects_old_sessions(tmp_path):
         snapshot=json.loads(result.snapshot_json)
         assert snapshot['workspace']['session_id']==session
         assert result.revision==snapshot['workspace']['revision']
-        assert result.frame_id=='base_link'
+        assert result.frame_id=='tabletop'
         block=snapshot['workspace']['tracks'][0]
         assert len(block['position'])==3 and len(block['quaternion'])==4
         selected=query(block_id=block['id'],session_id=session)

@@ -14,7 +14,9 @@ def test_generated_config_preserves_installation_and_quotes_environment(tmp_path
     source=tmp_path/'installation';source.mkdir()
     config=source/'scan.json'
     original={'cameras':{'wrist':{'mask':'mask.npy','intrinsics_file':'camera.json'}},
-              'scan':{'targets':{'side':[0.]*7}},'segmentation':{'backend':'depth','min_score':.8}}
+              'view_planner':{'backend':'mujoco_geometry','robot_path':'robot.xml','scene_config':'scene.json'},
+              'scan':{'targets':{'side':[0.]*7}},'segmentation':{'backend':'depth','min_score':.8},
+              'report_directory':'../reports'}
     config.write_text(json.dumps(original))
     runtime=tmp_path/'cache with spaces';runtime.mkdir()
     checkpoint=runtime/'weights.pt'
@@ -25,6 +27,9 @@ def test_generated_config_preserves_installation_and_quotes_environment(tmp_path
     assert data['scan']==original['scan']
     assert data['cameras']['wrist']['mask']==str(source/'mask.npy')
     assert data['cameras']['wrist']['intrinsics_file']==str(source/'camera.json')
+    assert data['view_planner']['robot_path']==str(source/'robot.xml')
+    assert data['view_planner']['scene_config']==str(source/'scene.json')
+    assert data['report_directory']==str(tmp_path/'reports')
     assert data['segmentation']['backend']=='sam2' and data['segmentation']['min_score']==.8
     assert json.loads(config.read_text())==original
     result=subprocess.run(['bash','-c','source "$1"; printf "%s" "$PHYAI_SAM2_CHECKPOINT"',

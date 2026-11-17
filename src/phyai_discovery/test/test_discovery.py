@@ -180,8 +180,12 @@ def test_conflicting_table_geometry_does_not_mutate_map():
     workspace.merge(Detector().detect(image_capture()))
     capture=image_capture(stamp=2.)
     capture.camera_to_map[2,3]+=.05
-    with pytest.raises(ValueError,match='Table geometry conflicts'):
+    with pytest.raises(ValueError,match='Table geometry conflicts') as error:
         workspace.merge(Detector().detect(capture))
+    assert 'camera=overhead' in str(error.value)
+    assert 'frame=base_link' in str(error.value)
+    assert 'normal difference=0.00 deg' in str(error.value)
+    assert 'surface distance=50.0 mm' in str(error.value)
     assert workspace.revision==1
 
 

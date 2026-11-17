@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
 
 import rclpy
@@ -46,6 +46,10 @@ class ViewerNode(Node):
             if simulator_port:cameras={}
             self.web=WorkspaceWeb(port,simulator_port, cameras=cameras,
                                   host=self.get_parameter('http_host').value)
+            if config.get('report_directory'):
+                try:self.web.load_report(Path(config_path).parent/config['report_directory'])
+                except (OSError,ValueError,KeyError) as error:
+                    self.get_logger().warning('Cannot load previous discovery report: '+str(error))
             for name,topic in cameras.items():
                 self.create_subscription(Image,topic,
                     lambda msg,name=name:self.on_camera(name,msg),
@@ -60,6 +64,8 @@ class ViewerNode(Node):
         self.next_block_query=0.
         self.block_info={'status':'waiting','message':'Waiting for search to finish.'}
         self.create_subscription(String,self.get_parameter('workspace_topic').value,self.on_workspace,1)
+        self.create_subscription(String,f'{interface_prefix}/accepted_capture',self.on_accepted_capture,
+            QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.pub = self.create_publisher(MarkerArray,self.get_parameter('markers_topic').value,1)
         self.create_timer(.5,self.tick)
 
@@ -75,6 +81,12 @@ class ViewerNode(Node):
             self.get_logger().warning(str(error), throttle_duration_sec=5.)
             return
         self.web.update_camera(name,jpeg)
+
+    def on_accepted_capture(self,msg):
+        if self.web is not None:
+            try:self.web.update_capture(json.loads(msg.data))
+            except (ValueError,KeyError,TypeError) as error:
+                self.get_logger().warning('Invalid accepted-capture diagnostics: '+str(error))
 
     def on_workspace(self,msg):
         try:

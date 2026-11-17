@@ -16,6 +16,7 @@ def inspection_targets(tracks, assessment):
         result.append({'id': track['id'] or track['hypothesis_id'],
                        'candidate_id': track.get('hypothesis_id') or track['id'],
                        'position': list(track['position']), 'size': list(track['size']),
+                       **({'quaternion':list(track['quaternion'])} if track.get('quaternion') is not None else {}),
                        'priority': priority,
                        'supporting_views': track.get('supporting_views', [])})
     return result
@@ -59,6 +60,9 @@ class SearchCriteria:
         pending = snapshot.get('hypotheses',[])
         if pending:
             reasons.append(f'{len(pending)} provisional object hypotheses')
+        unverified = snapshot.get('unverified_hypotheses', [])
+        if unverified:
+            reasons.append(f'{len(unverified)} unverified objects after inspection; scene remains uncertain')
         blocks = []
         for track in snapshot['tracks']:
             uncertainty = track.get('pose_uncertainty',{})
@@ -83,7 +87,8 @@ class SearchCriteria:
                 'min_wrist_views':self.min_wrist_views,
                 'max_position_uncertainty':self.max_position_uncertainty,
                 'max_yaw_uncertainty':self.max_yaw_uncertainty,
-                'blocks':blocks,'pending_hypotheses':len(pending),'support_count':support,
+                'blocks':blocks,'pending_hypotheses':len(pending),
+                'unverified_hypotheses':len(unverified),'support_count':support,
                 'basis':'evidence thresholds; not calibrated probabilities'}
 
     def improved(self, previous, current):

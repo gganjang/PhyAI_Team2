@@ -37,6 +37,13 @@ def test_live_capture_uses_file_and_retains_frame_and_size_checks(tmp_path):
     path=tmp_path/'camera.json'
     path.write_text(json.dumps(calibration()))
     config=json.loads((Path(__file__).parents[1]/'config/discovery.json').read_text())
+    config.update(detector={'known_block_size':[.075,.025,.015]},
+                  segmentation={'backend':'depth'},scope=None)
+    for key in ('view_planner','candidate_focus','inspection_rounds','search_criteria','report_directory'):
+        config.pop(key,None)
+    for camera,cfg in config['cameras'].items():
+        cfg['depth_topic']=f'/{camera}/depth/image_rect_raw'
+        cfg['info_topic']=f'/{camera}/depth/camera_info'
     config['cameras']['overhead'].update(intrinsics_file='camera.json', info_topic=None)
     config_path=tmp_path/'discovery.json'
     config_path.write_text(json.dumps(config))
@@ -72,7 +79,8 @@ def test_live_capture_uses_file_and_retains_frame_and_size_checks(tmp_path):
         capture=submitted[0]
         assert capture.intrinsics.fx==240. and capture.intrinsics.width==160
         assert capture.optical_frame=='overhead_optical'
-        np.testing.assert_allclose(capture.camera_to_map[:3,3],[0.,0.,1.])
+        assert capture.map_frame=='tabletop'
+        np.testing.assert_allclose(capture.camera_to_map[:3,3],[-.0755,.0655,1.])
     finally:
         if node is not None:
             node.destroy_node()

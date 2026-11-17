@@ -5,7 +5,7 @@ may run on a worker; complete() rejects results invalidated by reset or timeout.
 Sensor synchronization, capture freshness, motion, and transport belong to callers.
 """
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .observations import Capture
 from .perception import Detector, DetectorConfig
@@ -18,7 +18,7 @@ from .naming import name_inventory, zone_position
 
 
 def make_detector(cfg):
-    """Depth geometry by default; detector.backend='rgb' selects RGB-only SAM2."""
+    """Depth geometry by default; RGB uses the configured mask backend."""
     options = dict(cfg.get('detector', {}))
     backend = options.pop('backend', 'depth')
     segmenter = make_segmenter(cfg.get('segmentation'))
@@ -28,7 +28,7 @@ def make_detector(cfg):
         raise ValueError('Unknown detector backend.')
     from .rgb import RGBDetector
     if not hasattr(segmenter, 'propose'):
-        raise ValueError('RGB discovery requires segmentation.backend=sam2 for object proposals.')
+        raise ValueError('RGB discovery requires a segmentation backend with RGB object proposals.')
     if not options.get('known_block_size') or cfg.get('scope') is None:
         raise ValueError('RGB discovery requires detector.known_block_size and a table scope.')
     zone = cfg.get('stacking_zone_position') or [0., 0.]
@@ -41,6 +41,9 @@ def make_detector(cfg):
                        overhead_proposals_only=options.get('overhead_proposals_only', False),
                        proposal_only_viewpoints=options.get('proposal_only_viewpoints', ()),
                        planar=options.get('planar', True), scope=tuple(cfg['scope']),
+                       table_polygon=cfg.get('table_polygon'),
+                       excluded_regions=cfg.get('excluded_regions'),
+                       min_table_fraction=options.get('min_table_fraction',.99),
                        pixel_error=options.get('pixel_error', 1.),
                        calibration_error=options.get('calibration_error', .0005))
 
@@ -55,22 +58,29 @@ class Discovery:
     def __init__(self, config=None, *, detector=None):
         self.config = deepcopy(config or {})
         cfg = self.config
+        self.mode=cfg.get('discovery_mode','full')
+        if self.mode not in ('full','survey_only'):
+            raise ValueError('discovery_mode must be full or survey_only.')
         focus = cfg.get('candidate_focus', {})
         if focus is None:focus = {}
         if not isinstance(focus, dict) or not isinstance(focus.get('enabled', False), bool):
             raise ValueError('candidate_focus must contain a boolean enabled setting.')
         self.focus = (CandidateFocus(focus.get('max_views_per_candidate', 3))
                       if focus.get('enabled', False) else None)
+        self.inspection_outcomes = {}
         self.workspace = Workspace(frame=cfg.get('map_frame', 'base_link'),
-            cell_size=cfg.get('cell_size', .02), scope=cfg.get('scope'))
+            cell_size=cfg.get('cell_size', .02), scope=cfg.get('scope'),
+            table_polygon=cfg.get('table_polygon'),table_plates=cfg.get('table_plates'),
+            excluded_regions=cfg.get('excluded_regions'))
         self.stacking_zone_position = zone_position(cfg.get('stacking_zone_position'))
         self.search = Search(self.workspace, cfg.get('viewpoints', ('wrist_1', 'wrist_2')),
             cfg.get('max_retries', 2), cfg.get('capture_timeout', 15.),
             criteria=(cfg.get('search_criteria') or {}) if self.focus is not None else cfg.get('search_criteria'),
-            inspection_rounds=cfg.get('inspection_rounds', ()),
+            inspection_rounds=cfg.get('inspection_rounds', ()) if self.mode=='full' else (),
             use_overhead=cfg.get('use_overhead', True),
             overhead_capture_timeout=cfg.get('overhead_capture_timeout'),
-            overhead_max_retries=cfg.get('overhead_max_retries'))
+            overhead_max_retries=cfg.get('overhead_max_retries'),
+            processing_timeout=cfg.get('processing_timeout'))
         self.detector = detector if detector is not None else make_detector(cfg)
         self._active_job = None
         self.survey_views = frozenset(focus.get('survey_viewpoints', self.search.base_viewpoints))
@@ -87,6 +97,22 @@ class Discovery:
         if self.focus is None:
             return
         if self.search.state == SearchState.FINISHED:
+            # The shared sequence can end before any one proposal reaches its
+            # own limit. Preserve those objects as unverified in the report,
+            # rather than leaving a finished run full of active candidates.
+            result = self.search.result or {}
+            if result.get('stop_reason') in ('view_budget_exhausted', 'candidate_views_exhausted', 'no_progress'):
+                changed = False
+                for track in list(self.workspace.hypotheses):
+                    candidate_id = track['hypothesis_id']
+                    count = len(self.inspection_outcomes.get(candidate_id, set()))
+                    if not count:
+                        continue  # An unreachable, uninspected proposal stays pending.
+                    changed |= self.workspace.retire_unverified(candidate_id,
+                        f'Inspection ended after {count} accepted close views: '
+                        f'{result["stop_reason"]}; object remains unverified.')
+                if changed:
+                    self.search.finish(self.search.reason, stop_reason=result['stop_reason'])
             self.focus.retire()
             return
         if self.search.state != SearchState.WRIST:
@@ -103,6 +129,9 @@ class Discovery:
         if request is None:
             reason = ('No pending candidate inspections; scene uncertainty is retained.' if not targets
                       else 'No feasible candidate views remain within the configured budgets; uncertainty is retained.')
+            if targets and all(t['candidate_id'] in self.focus.unavailable for t in targets):
+                reason=(f'{len(targets)} remaining candidates have no feasible views from the current pose; '
+                        'inspection stopped with a partial result, not a verified inventory.')
             self.search.finish(reason, stop_reason=('candidate_inspections_complete' if not targets
                                                    else 'candidate_views_exhausted'))
             self._active_job = None
@@ -154,6 +183,8 @@ class Discovery:
         self.search.begin()
         if self.focus is not None:
             self.focus.started()
+            if self.focus.current and self.focus.current.get('focus'):
+                capture=replace(capture,inspection_target=deepcopy(self.focus.current['focus']))
         job = CaptureJob(self.search.generation, capture)
         self._active_job = job
         return job
@@ -166,7 +197,26 @@ class Discovery:
         """Merge a current worker result; return False for an invalidated job."""
         if not self._current(job):
             return False
-        self.search.accept(detection)
+        request=self.view_request()
+        self.search.accept(detection,allow_new=not bool(request and request.get('focus')))
+        if request and request.get('focus'):
+            if self.focus is not None:self.focus.moved()
+            candidate_id = request['focus']['candidate_id']
+            views = self.inspection_outcomes.setdefault(candidate_id, set())
+            views.add((detection.camera, detection.viewpoint))
+            exhausted = self.focus is not None and len(views) >= self.focus.max_views
+            if exhausted:
+                self.workspace.retire_unverified(candidate_id,
+                    f'{len(views)} accepted close views without geometry confirmation; '
+                    'object is unverified, not proven absent or non-block.')
+                if self.search.criteria is not None:
+                    self.search.assessment = self.search.criteria.assess(self.workspace.snapshot())
+                if self.search.state == SearchState.FINISHED:
+                    self.search.finish(self.search.reason,
+                        stop_reason=self.search.result['stop_reason'])
+        if self.mode=='survey_only' and self.search.state==SearchState.FINISHED:
+            self.search.finish('Survey finished; review provisional candidates before close inspection.',
+                               stop_reason='survey_complete')
         self._active_job = None
         if self.focus is not None:
             self.focus.retire()
@@ -186,7 +236,7 @@ class Discovery:
         """Synchronously detect and merge one requested, stationary capture."""
         job = self.begin(capture, stationary=stationary)
         try:
-            detection = self.detector.detect(capture)
+            detection = self.detector.detect(job.capture)
             self.complete(job, detection)
         except Exception as error:
             self.fail(job, error)
@@ -196,6 +246,7 @@ class Discovery:
     def reset(self):
         self.workspace.reset()
         self.search.reset()
+        self.inspection_outcomes = {}
         self._active_job = None
         reset_detector = getattr(self.detector, 'reset', None)
         if reset_detector is not None:
@@ -243,8 +294,10 @@ class Discovery:
     def snapshot(self, stamp=None):
         """Return the workspace/search handoff shared by pipeline consumers."""
         workspace = self.workspace.snapshot(stamp)
+        if self.config.get('coordinate_system'):
+            workspace['coordinate_system'] = deepcopy(self.config['coordinate_system'])
         search = deepcopy(self.search.progress())
         name_inventory(workspace, search, self.stacking_zone_position)
-        return {'workspace': workspace, 'search': search,
+        return {'workspace': workspace, 'search': search,'discovery_mode':self.mode,
                 'view_request': self.view_request(),
                 'candidate_focus': self.focus.snapshot() if self.focus is not None else None}

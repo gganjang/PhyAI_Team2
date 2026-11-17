@@ -80,8 +80,8 @@ ros2 run piper_mujoco_sim scatter_blocks scatter --seed 7
 ros2 run piper_mujoco_sim scatter_blocks reset
 ```
 
-실험실 장면은 `arm_geometry`로 긴 PIPER 팔(상완 338 mm, 전완 322 mm)을 사용합니다.
-Isaac 시뮬레이터의 제한을 포함한 [팔 형상 상세](docs/development.md#lab-scene-and-camera-views)를 참고하세요.
+실험실 장면은 공식 PiPER-L 모델의 링크 좌표계와 메시를 그대로 사용합니다.
+[모델 상세](docs/development.md#lab-scene-and-camera-views)를 참고하세요.
 
 앱 구조, 의존성, 시뮬레이터 상세: [개발 참고 문서](docs/development.md).
 
@@ -91,15 +91,17 @@ Isaac 시뮬레이터의 제한을 포함한 [팔 형상 상세](docs/developmen
 Discovery는 두 경우 모두 설정된 ROS 인터페이스를 사용합니다.
 
 ```bash
-bash scripts/run_discovery.sh     # 기본 설정으로 관찰 + 웹 뷰어
+bash scripts/run_discovery.sh     # RGB Discovery + 자동 스캔 + 웹 뷰어
 ```
 
 **http://localhost:23518**에서 작업대 지도, 후보, 최종 목록, 손목·천장 카메라 영상을 봅니다.
-뷰어는 기본으로 켜지고 팔 자동 동작은 꺼져 있습니다.
-ROS와 워크스페이스를 자동으로 불러오고, 없는 Discovery 패키지는 SAM2 준비 전에 빌드합니다.
+뷰어와 팔 자동 스캔은 기본으로 켜집니다. 팔을 움직이지 않고 관찰하려면
+`-- auto_scan:=false`를 사용합니다.
+ROS와 워크스페이스를 자동으로 불러오고, 없는 Discovery 패키지는 설정된 모델을 준비하기 전에 빌드합니다.
 코드를 pull한 뒤에는 `bash scripts/run_discovery.sh --build`로 다시 빌드합니다.
 다른 워크스페이스는 `PHYAI_WS=/path/to/workspace`로 지정합니다.
-독립 checkout은 `.discovery-ros/`를 사용합니다. SAM2 의존성과 가중치는 캐시를 재사용합니다.
+독립 checkout은 `.discovery-ros/`를 사용합니다. 모델 의존성과 가중치는 캐시를 재사용합니다. 하드웨어 기본값은 SAM 3.1입니다. 체크포인트를 받으려면 이 환경에서 인증해야 합니다.
+[SAM 3.1 모델 준비](src/phyai_discovery_ros/README.md#sam-31-segmentation)를 참고하세요.
 
 **`--config`는 선택 사항입니다.** 기본으로 포함된
 `src/phyai_discovery_ros/config/discovery.json`을 사용합니다.
@@ -108,13 +110,17 @@ ROS와 워크스페이스를 자동으로 불러오고, 없는 Discovery 패키�
 
 | `src/phyai_discovery_ros/config/`의 설정 | 용도 |
 |---|---|
-| [discovery.json](src/phyai_discovery_ros/config/discovery.json) | 기본 관찰 설정. 고정 스캔 포즈는 없음 |
+| [discovery.json](src/phyai_discovery_ros/config/discovery.json) | RGB/SAM 3.1 하드웨어 기본 설정. 생성된 작업대 스캔과 후보별 검사 플래너 |
 | [discovery_rgb.json](src/phyai_discovery_ros/config/discovery_rgb.json) | RGB Discovery와 후보별 검사 통합 템플릿 |
 | [piper_scan.example.json](src/phyai_discovery_ros/config/piper_scan.example.json) | 고정 포즈·관절 한계 예제. 실제 설치에 맞게 조정·검증 필요 |
 | [mujoco_interface.json](src/phyai_discovery_ros/config/mujoco_interface.json) | 독립 시뮬레이션 템플릿. 실행 시 현재 survey와 검사 정책 동기화 |
 
-**현재 기본 설정에는 스캔 포즈가 없습니다.** 팔을 움직이려면 `scan.targets`와
-`scan.joint_limits`가 포함된 설정을 선택하고 자동 스캔을 켭니다.
+기본 스캔은 실제 관절 프레임·한계와 카메라 보정을 적용한 공통 플래너를 사용합니다.
+천장 카메라와 고정 자세의 코브라 스캔 20개로 후보 위치를 찾은 뒤 후보별 근접 검사를 수행합니다.
+근접 기둥 스캔은 첫 이동에서 흔들림이 관찰되어 기본으로 꺼져 있으며, 작업대 지도는 전체를 표시합니다.
+빠른 스캔과 느린 정밀 검사에는 별도 이동·정착 시간을 사용합니다.
+첫 포즈로의 접근은 실제 관절 피드백과 브리지의 실행 보호 기능을 사용합니다.
+다른 설치에서는 해당 환경의 `scan.targets`와 `scan.joint_limits`가 포함된 설정을 선택합니다.
 
 ```bash
 bash scripts/run_discovery.sh --config /path/scan-enabled.json -- auto_scan:=true

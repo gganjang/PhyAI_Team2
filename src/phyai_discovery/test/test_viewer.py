@@ -35,9 +35,10 @@ def test_live_camera_preview_endpoints_and_stale_frames(monkeypatch):
     from phyai_discovery.viewer import web as module
     clock=[100.]
     monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
-    viewer=WorkspaceWeb(0,cameras={'wrist':'/real/wrist/color','overhead':'/real/overhead/color'})
+    viewer=WorkspaceWeb(0,host='0.0.0.0',cameras={'wrist':'/real/wrist/color','overhead':'/real/overhead/color'})
     root=f'http://127.0.0.1:{viewer.server.server_port}'
     try:
+        assert viewer.server.server_address[0]=='0.0.0.0'
         packet=json.load(urlopen(root+'/api/workspace'))
         assert packet['cameras']['wrist']=={'topic':'/real/wrist/color','age':None}
         assert packet['snapshot'] is None  # Preview works before discovery starts.
@@ -57,10 +58,21 @@ def test_live_camera_preview_endpoints_and_stale_frames(monkeypatch):
     finally:viewer.close()
 
 
-def test_viewer_listen_address_can_enable_lan_access():
-    viewer=WorkspaceWeb(0,host='0.0.0.0')
+def test_occupied_viewer_port_reports_address_and_recovery_options():
+    import errno
+    import pytest
+
+    viewer=WorkspaceWeb(0)
+    port=viewer.server.server_port
     try:
-        assert viewer.server.server_address[0]=='0.0.0.0'
-        with urlopen(f'http://127.0.0.1:{viewer.server.server_port}/') as response:
+        with pytest.raises(OSError) as error:
+            WorkspaceWeb(port)
+        assert error.value.errno==errno.EADDRINUSE
+        assert f'127.0.0.1:{port}' in str(error.value)
+        assert 'viewer_port:=24518' in str(error.value)
+        assert 'http_port:=24518' in str(error.value)
+        assert 'with_viewer:=false' in str(error.value)
+        # The failed second instance must leave the original listener working.
+        with urlopen(f'http://127.0.0.1:{port}/') as response:
             assert response.status==200
     finally:viewer.close()
