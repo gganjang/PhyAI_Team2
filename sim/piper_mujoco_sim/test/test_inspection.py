@@ -85,6 +85,20 @@ def test_reposition_splits_rejected_wrist_flip_into_checked_gentle_legs(planner)
     np.testing.assert_allclose(previous,result['joints'])
 
 
+def test_inspection_defers_a_view_exceeding_the_signed_joint_travel_budget(planner):
+    current=[0.,1.57,-1.3485,0.,0.,0.,0.]
+    plan=planner.choose([target()],current,'seed')
+    q=plan['joints'];eye,axes=planner.pose(q)
+    planner.pool=np.array([q]);planner.positions=np.array([eye]);planner.rotations=np.array([axes])
+    planner.reset();planner.allow_reposition=True
+    planner.motion_preferences={'max_reposition_joint_change':np.deg2rad(60)}
+    distant=list(q);distant[5]+=np.deg2rad(90)
+    assert planner.choose([target()],distant,'close') is None
+    assert 'reposition travel limit' in planner.last_failure
+    assert not planner.history
+    assert planner.choose([target()],q,'close') is not None
+
+
 def test_simulator_object_truth_cannot_change_selected_view(planner):
     current = [0.,1.57,-1.3485,0.,0.,0.,0.]
     before = planner.choose([target()],current,'close_1')

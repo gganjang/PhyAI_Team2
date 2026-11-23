@@ -166,7 +166,18 @@ def installation_model(config):
 
 
 def create_view_planner(config, targets):
+    options=config.get('view_planner',{})
+    mask=options.get('robot_mask')
+    if isinstance(mask,dict):
+        import json
+        limits=config['scan']['joint_limits']
+        path=Path(mask['installation_config'])
+        config=json.loads(path.read_text())
+        resolve_planner_paths(config,path.parent)
     model=installation_model(config)
+    if isinstance(mask,dict):
+        for i,bounds in enumerate(limits,1):
+            model.joint(f'joint{i}').range[:]=bounds
     from piper_mujoco_sim.inspection import InspectionPlanner
     # Free objects are disabled; focus positions come from measured requests.
     return InspectionPlanner(model,list(targets.values()),None,
@@ -174,22 +185,78 @@ def create_view_planner(config, targets):
         fixed_wrist_roll=not bool(config['view_planner'].get('installation')),
         allow_inverted=bool(config['view_planner'].get('installation')),
         sample_count=config['view_planner'].get('sample_count',3000),
-        motion_preferences=config['view_planner'].get('inspection_motion'),
+        motion_preferences={**(config['view_planner'].get('inspection_motion') or {}),
+                            **(options.get('inspection_motion') or {})},
         allow_reposition=config['view_planner'].get('inspection_reposition',False))
 
 
 class RobotMaskModel:
     """Project only known robot geometry at capture-matched measured joints."""
-    def __init__(self, config):
+    def __init__(self, config, *, use_scene_base=False):
         import mujoco
         self.config=config
+        self.use_scene_base=use_scene_base
         self.model=installation_model(config)
         self.data=mujoco.MjData(self.model)
         self.addresses=[self.model.joint(f'joint{i}').qposadr[0] for i in range(1,7)]
 
-    def project(self, capture, history):
+    def covered_survey_views(self, workspace, intrinsics, broad, targets, base_in_map, block_size):
+        """Find redundant stops along the same signed base sweep using overhead evidence."""
+        import mujoco
+        import numpy as np
+        from phyai_discovery.coordinates import map_origin, source_frame
+
+        if not self.use_scene_base:
+            if source_frame(self.config) != 'base_link' or not self.config['view_planner'].get('installation'):
+                return []
+            base_in_map = -map_origin(self.config)
+        if base_in_map is None or workspace.scope is None or len(broad) < 3:
+            return []
+        poses=np.asarray([targets[label] for label in broad],dtype=float)
+        yaw_steps=np.diff(poses[:,0])
+        # Removing an interior stop must leave exactly the same swept joint path.
+        if not np.allclose(poses[:,1:],poses[0,1:],rtol=0.,atol=1e-9):
+            return []
+        if not (np.all(yaw_steps>0.) or np.all(yaw_steps<0.)):
+            return []
+
+        cells=workspace.snapshot()['coverage']['cells']
+        xy=(np.asarray([entry['index'] for entry in cells]).reshape(-1,2)+0.5)*workspace.cell_size
+        bounds=np.asarray(workspace.scope).reshape(2,2)
+        in_scope=((xy>=bounds[:,0]) & (xy<bounds[:,1])).all(axis=1)
+        known=np.array([entry['camera']=='overhead' and entry.get('explored',False)
+                        and not entry.get('unexplained',False) for entry in cells])
+        if not np.any(known & in_scope):
+            return []
+        # A square inside the block's inscribed circle fits at any block yaw.
+        # If even that square is clipped, this pose cannot propose a whole block there.
+        half=min(block_size[:2])/(2*np.sqrt(2))
+        offsets=np.array([[x,y,z] for x in (-half,half) for y in (-half,half)
+                          for z in (0.,block_size[2])])
+        corners=np.c_[xy,np.zeros(len(xy))][:,None,:]+offsets
+        skipped=[]
+        for label,pose in zip(broad[1:-1],poses[1:-1]):
+            self.data.qpos[self.addresses]=pose[:6]
+            mujoco.mj_kinematics(self.model,self.data)
+            mujoco.mj_camlight(self.model,self.data)
+            camera=self.data.camera('wrist')
+            optical=camera.xmat.reshape(3,3)*[1.,-1.,-1.]
+            local=(corners-camera.xpos-base_in_map)@optical
+            depth=local[:,:,2]
+            pixels=local[:,:,:2]/np.maximum(depth[:,:,None],1e-6)*[intrinsics.fx,intrinsics.fy]
+            pixels+=[intrinsics.cx,intrinsics.cy]
+            # Expand the bounds a few pixels to keep near-border cells in play.
+            fits=((pixels>=-4.) & (pixels<=[intrinsics.width+4.,intrinsics.height+4.])).all(axis=(1,2))
+            footprint=in_scope & (depth>0.).all(axis=1) & fits
+            if np.any(footprint) and np.all(known[footprint]):
+                skipped.append(label)
+        return skipped
+
+    def project(self, capture, history, *, base_in_map=None):
         import mujoco
         from piper_mujoco_sim.robot_mask import robot_mask
+        if self.use_scene_base and base_in_map is None:
+            raise ValueError('Waiting for the simulator robot base position for robot exclusion.')
         if not history:
             raise ValueError('Waiting for capture-matched joint feedback for robot exclusion.')
         stamp,joints=min(history,key=lambda sample:abs(sample[0]-capture.stamp))
@@ -201,7 +268,14 @@ class RobotMaskModel:
         mujoco.mj_kinematics(self.model,self.data)
         from dataclasses import replace
         from phyai_discovery.coordinates import camera_to_source, source_frame
-        source_capture=(replace(capture,map_frame=source_frame(self.config),
-            camera_to_map=camera_to_source(self.config,capture.camera_to_map))
-            if self.config.get('coordinate_system') else capture)
+        source_capture=capture
+        if self.use_scene_base:
+            # The Isaac lab bridge publishes the base position in a world frame
+            # whose axes are parallel to the robot base.
+            camera_to_base=capture.camera_to_map.copy()
+            camera_to_base[:3,3]-=base_in_map
+            source_capture=replace(capture,map_frame='base_link',camera_to_map=camera_to_base)
+        elif self.config.get('coordinate_system'):
+            source_capture=replace(capture,map_frame=source_frame(self.config),
+                camera_to_map=camera_to_source(self.config,capture.camera_to_map))
         return robot_mask(self.model,self.data,source_capture)

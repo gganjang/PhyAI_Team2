@@ -68,6 +68,7 @@ class ScanNode(Node):
                 raise ValueError('Base joint limits must stay within the cable limit (at most +/-180 deg).')
         self.targets=scan['targets']
         self.survey_labels=set(config['viewpoints'])
+        self.prepositioning=False
         if scan_key=='scan' and scan.get('targeted_inspection', False):
             raise ValueError('Use shared candidate_focus settings and a plan_view robot adapter.')
         self.planner=None
@@ -122,6 +123,7 @@ class ScanNode(Node):
         self.get_logger().info('PIPER scan enabled using JointState commands and measured arrival feedback.')
 
     def clear_motion(self):
+        self.prepositioning=False
         self.active=self.initial=self.started=self.settled_since=None
         self.capture_future=None
         self.request_key=None
@@ -255,15 +257,25 @@ class ScanNode(Node):
             self.planner=create_view_planner(self.config,self.targets)
             for name,joints in self.selected_targets.items():self.planner.remember(name,joints)
         from phyai_discovery.coordinates import target_to_source, map_origin
-        plan=self.planner.choose([target_to_source(self.config,request['focus'])],current,label)
+        target=target_to_source(self.config,focus)
+        origin=map_origin(self.config)
+        if isinstance(self.config.get('view_planner',{}).get('robot_mask'),dict):
+            origin=-np.asarray(self.discovery['robot_base_in_map'])
+            target={**focus,'position':(np.asarray(focus['position'])+origin).tolist()}
+        if request.get('companions'):
+            target['companions']=[{**peer,'position':(np.asarray(peer['position'])+origin).tolist()}
+                                  for peer in request['companions']]
+        plan=self.planner.choose([target],current,label)
         if plan:
             # Planner geometry stays in the arm frame; public targets and logs
             # use the same tabletop map as the measured inventory.
-            plan={**plan,'position':(np.asarray(plan['position'])-map_origin(self.config)).tolist()}
+            plan={**plan,'position':(np.asarray(plan['position'])-origin).tolist()}
         self.inspection_focus=plan
         if plan:
             self.request_routes[request.get('request_id')]=plan.get('waypoints',[])
-            self.get_logger().info(f'Inspection {label}: focus {plan["focus"]} at {plan["position"]}')
+            shared=plan.get('shared_candidates',[])
+            detail=f'; also targeting {", ".join(shared)}' if shared else ''
+            self.get_logger().info(f'Inspection {label}: focus {plan["focus"]} at {plan["position"]}{detail}')
             return plan['joints']
         return None
 
@@ -316,6 +328,10 @@ class ScanNode(Node):
             if self.active:self.fault_stop('Joint feedback or discovery became stale.')
             return
         progress=self.discovery['search']
+        if (isinstance(self.config.get('view_planner',{}).get('robot_mask'),dict)
+                and self.discovery.get('robot_base_in_map') is None):
+            self.wait_reason='Waiting for the simulator robot base position.'
+            return
         if progress['state']=='search_finished':
             if self.active:self.command(self.last_motion_command if self.request_key is not None and self.last_motion_command is not None else self.actual)
             self.wait_reason='Search completed.'
@@ -331,6 +347,23 @@ class ScanNode(Node):
         target_name=progress['target']
         view_request=self.discovery.get('view_request')
         request_id=view_request['request_id'] if view_request is not None else None
+        ahead=self.discovery.get('next_survey_pose') if self.config.get('overlap_survey_motion') else None
+        overhead_start=(self.config.get('overlap_overhead_capture') and progress['state']=='capture_overhead')
+        if ahead not in self.survey_labels or (progress['state']!='detect_and_merge' and not overhead_start):
+            ahead=None
+        if self.prepositioning:
+            if progress['state']=='wait_for_wrist_view' and target_name==self.active:
+                # Adopt the in-flight trajectory under the actual capture request.
+                self.prepositioning=False
+                self.active_request_id=request_id
+            else:
+                # Finish the checked leg, including when discovery needs to retry
+                # the preceding image. Never report arrival for a predicted view.
+                ahead=self.active
+        if ahead:
+            target_name=ahead
+            request_id=None
+            view_request=None
         if self.view_report_future is not None:
             self.wait_reason='Waiting for discovery to select the next view.'
             if self.view_report_future.done():
@@ -357,9 +390,9 @@ class ScanNode(Node):
                 except Exception as error:self.fault_stop(str(error))
                 self.capture_future=None
             return
-        if progress['state']!='wait_for_wrist_view':
+        if not ahead and progress['state']!='wait_for_wrist_view':
             self.wait_reason='Discovery: '+progress['state'];return
-        if self.config.get('candidate_focus', {}).get('enabled', False) and view_request is None:
+        if not ahead and self.config.get('candidate_focus', {}).get('enabled', False) and view_request is None:
             self.wait_reason='Waiting for the shared discovery view request.'
             return
         key=(self.session,progress['viewpoint_index'],progress['rejected'],request_id)
@@ -368,7 +401,7 @@ class ScanNode(Node):
             self.clear_motion()
         if target_name not in self.targets and not (view_request and view_request.get('focus')):
             self.fault_stop('No configured scan pose for '+target_name);return
-        target=self.select_target(target_name)
+        target=self.targets[target_name] if ahead else self.select_target(target_name)
         if self.fault:return
         if target is None and view_request is not None:
             reason=(getattr(self.planner,'last_failure',None)
@@ -404,6 +437,7 @@ class ScanNode(Node):
                 self.fault_stop('Arm moved away from the held command between views; scan halted.')
                 return
             self.active=target_name;self.active_request_id=request_id;self.initial=list(anchor)
+            self.prepositioning=bool(ahead)
             self.started=self.motion_time();self.settled_since=None
             broad=self.config.get('survey_stages',{}).get('broad',[])
             if not self.moved and self.scan.get('raise_before_sweep',False) and target_name in broad:
@@ -411,8 +445,12 @@ class ScanNode(Node):
                 # settles may the base rotate toward the first survey view.
                 self.approach_waypoint=[self.actual[0],*target[1:]]
             phase=view_request.get('phase','survey') if view_request else 'survey'
-            if phase=='survey' and target_name in self.config.get('survey_stages',{}).get('near_post',[]):
-                phase='near_post'
+            if phase=='survey':
+                stages=self.config.get('survey_stages',{})
+                if target_name in stages.get('near_post',[]):
+                    phase='near_post'
+                elif target_name in stages.get('coverage',[]):
+                    phase='coverage'
             self.active_phase=phase
             if phase=='candidate_inspection' and len(route)>1:
                 self.approach_waypoint=list(route[0])
@@ -455,7 +493,7 @@ class ScanNode(Node):
                     target=self.remaining_waypoints.pop(0)
                     self.approach_waypoint=list(target)
                 else:
-                    target=self.select_target(target_name)
+                    target=self.targets[target_name] if ahead else self.select_target(target_name)
                     self.approach_waypoint=None
                 self.initial=list(self.last_motion_command)
                 self.started=self.motion_time();self.settled_since=None
@@ -470,8 +508,13 @@ class ScanNode(Node):
                                   else 'Raised near post; rotating to '+target_name)
                 self.get_logger().info(self.wait_reason)
                 return
-            ready=self.view_client.service_is_ready() if view_request is not None else self.client.service_is_ready()
+            ready=ahead is not None or (self.view_client.service_is_ready() if view_request is not None else self.client.service_is_ready())
             if self.motion_time()-self.settled_since>=self.active_settle_seconds and ready:
+                if ahead:
+                    if self.discovery.get('next_survey_pose')!=ahead:
+                        self.clear_motion()
+                    self.wait_reason='Waiting for segmentation before capture at '+target_name
+                    return
                 self.request_key=key
                 self.capture_future=(self.report_view(view_request, 'arrived') if view_request is not None
                                      else self.client.call_async(Trigger.Request()))

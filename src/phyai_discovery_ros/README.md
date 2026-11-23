@@ -87,10 +87,13 @@ was observed at its first transition. Its model checks and slow trajectory
 profile did not establish acceptable real-arm behavior. Disabling it does not
 remove any part of the tabletop map or coverage scope.
 
-The current `discovery_mode: full` runs the broad sweep then candidate inspection
-with 32 inspection slots and four attempts per candidate. `survey_stages`
-contains an empty near-post list. Set `survey_only` to stop for review after
-the broad sweep. Two close-up measurements remain required to confirm a block.
+The current `discovery_mode: full` runs 11 Cobra stops and four outer-table
+coverage views before candidate inspection. Isaac uses the same nominal joint
+targets. Both can skip interior Cobra stops when usable overhead evidence covers
+their view, and can use one close image to measure multiple candidates. The
+near-post list is empty. Set `survey_only` to stop for review after the survey.
+Candidate inspection has 32 slots and four attempts per candidate. Two close-up
+measurements remain required to confirm a block.
 Unobserved areas, including the post region, remain explicitly unobserved.
 
 Round or undersized instance masks cannot become elongated-block hypotheses
@@ -105,9 +108,9 @@ polygon/scope before association and again before inspection planning. Raw masks
 remain available in diagnostics with `outside_tabletop` or
 `outside_table_footprint` decisions; they do not become inspection targets.
 
-`scan.motion_profiles` distinguishes survey and inspection timing. The survey
-retains its existing cubic interpolation with 0.25 rad/s speed, 0.5 rad/s²
-acceleration and 0.25 s settling. Inspection uses a seventh-order trajectory
+`scan.motion_profiles` sets timing for each phase. On hardware the Cobra sweep
+uses cubic interpolation with 0.25 rad/s speed, 0.5 rad/s² acceleration and
+0.25 s settling. Coverage and inspection moves use a seventh-order trajectory
 with zero velocity, acceleration and jerk at both ends; duration is calculated
 to bound peak speed at 0.15 rad/s, acceleration at 0.15 rad/s² and jerk at
 0.3 rad/s³. Inspection moves take at least 3 seconds and settle for 1 second.

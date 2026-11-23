@@ -55,6 +55,9 @@ def write_runtime(runtime, python, checkpoint, info, device, config):
     """Resolve camera asset paths before moving the config into the runtime cache."""
     config_path=Path(config).resolve()
     data=json.loads(config_path.read_text())
+    if os.environ.get('PHYAI_ISAAC_REPORT_DIRECTORY'):
+        data.setdefault('report_directory',os.environ['PHYAI_ISAAC_REPORT_DIRECTORY'])
+        data.setdefault('ground_truth_topic','/sim/scene')
     for camera in data.get('cameras',{}).values():
         for key in ('mask','intrinsics_file'):
             if camera.get(key):camera[key]=str((config_path.parent/camera[key]).resolve())

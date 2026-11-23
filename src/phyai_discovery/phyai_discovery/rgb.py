@@ -245,7 +245,7 @@ class RGBObserver:
                             unexplained=np.zeros_like(in_scope), unknown=np.zeros_like(in_scope))
         return masks
 
-    def segmented_blocks(self, frame, world, in_scope):
+    def segmented_blocks(self, frame, world, in_scope, *, survey=False):
         """Select size/shape-compatible proposals; SAM2 does not classify blocks.
 
         A block segment lies almost entirely on the visible tabletop and covers
@@ -262,7 +262,10 @@ class RGBObserver:
         unknown = np.zeros_like(in_scope)
         border = np.zeros_like(in_scope)
         border[:2], border[-2:], border[:, :2], border[:, -2:] = True, True, True, True
-        masks=self.segmenter.propose(frame.rgb)
+        propose=self.segmenter.propose
+        if survey:
+            propose=getattr(self.segmenter,'propose_survey',propose)
+        masks=propose(frame.rgb)
         metadata=getattr(self.segmenter,'proposal_metadata',[])
         self.segmentation=[{'index':i,'mask':np.asarray(mask,dtype=bool),'decision':'unprocessed',
                            **(metadata[i] if i<len(metadata) else {})}
@@ -356,7 +359,7 @@ class RGBObserver:
                             unknown=unknown & ~objects)
         return kept
 
-    def initialise(self, frame, zone):
+    def initialise(self, frame, zone, *, survey=False):
         rgb = frame.rgb.astype(float)
         # SAM2 instance segments, selected by calibrated geometry, propose
         # blocks of any colour. Colour never selects or identifies a block. The
@@ -367,7 +370,7 @@ class RGBObserver:
         self.regions = None
         self.segmentation=[]
         if self.segmenter is not None and hasattr(self.segmenter, 'propose'):
-            masks = self.segmented_blocks(frame, world, in_scope)
+            masks = self.segmented_blocks(frame, world, in_scope, survey=survey)
         else:
             masks = self.contrast_blocks(frame, rgb, in_scope)
         self.regions.update(in_scope=in_scope, top=world)
@@ -628,7 +631,8 @@ class RGBDetector:
         frame = RGBFrame(capture.camera, capture.stamp, capture.intrinsics,
                          capture.camera_to_map, capture.rgb, capture.mask)
         observer.frames.clear()
-        observer.initialise(frame, self.zone)
+        observer.initialise(frame, self.zone, survey=capture.camera=='wrist' and
+                            capture.viewpoint in self.proposal_only_viewpoints)
         seed_only = ((capture.camera == 'overhead' and self.overhead_proposals_only)
                      or capture.viewpoint in self.proposal_only_viewpoints)
         # Initial discovery observes a static scene. Preserve distinct calibrated

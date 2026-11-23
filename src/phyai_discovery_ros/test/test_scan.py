@@ -118,6 +118,40 @@ def test_new_view_preserves_last_command_despite_allowed_feedback_error(scan):
     assert node.initial!=node.actual
 
 
+@pytest.mark.parametrize('retry',[False,True])
+def test_survey_motion_overlaps_processing_but_capture_waits_for_request(scan,retry):
+    node,clock,commands,calls=scan
+    node.config['overlap_survey_motion']=True
+    node.targets['next']=[.08,0.,0.,0.,0.,0.,0.]
+    node.survey_labels.add('next')
+    node.actual=list(node.targets['side'])
+    node.last_motion_command=list(node.actual)
+    node.active='side'
+    node.request_key=('session',0,0,None)
+    node.moved=True
+    node.discovery.update(next_survey_pose='next')
+    node.discovery['search']['state']='detect_and_merge'
+    node.tick()
+    assert node.prepositioning and node.active=='next'
+    clock.now=node.started+node.active_duration+.01
+    node.actual=list(node.targets['next'])
+    node.feedback_received=node.discovery_received=clock.now
+    node.tick()
+    clock.now+=.1
+    node.tick()
+    assert commands[-1]==node.actual and not calls
+    node.discovery['next_survey_pose']=None
+    node.discovery['search'].update(state='wait_for_wrist_view',
+        target='side' if retry else 'next',viewpoint_index=0 if retry else 1,rejected=int(retry))
+    node.tick()
+    node.tick()
+    assert not node.fault and not node.prepositioning
+    if retry:
+        assert node.active=='side' and not calls
+    else:
+        assert len(calls)==1
+
+
 def test_unexpected_request_change_mid_move_stops_instead_of_jumping(scan):
     node,clock,commands,calls=scan
     node.tick()
@@ -170,10 +204,15 @@ def test_successful_late_arrival_does_not_also_trigger_timeout(scan):
     assert node.fault is None
 
 
-def test_cobra_approach_raises_with_base_held_then_rotates_before_capture(scan):
+@pytest.mark.parametrize('overhead_in_progress',[False,True])
+def test_cobra_approach_raises_with_base_held_then_rotates_before_capture(scan,overhead_in_progress):
     node,clock,commands,calls=scan
     node.scan['raise_before_sweep']=True
     node.config['survey_stages']={'broad':['side']}
+    if overhead_in_progress:
+        node.config.update(overlap_survey_motion=True,overlap_overhead_capture=True)
+        node.discovery['search'].update(state='capture_overhead',target='overhead')
+        node.discovery['next_survey_pose']='side'
     node.targets['side']=[.8,.5,-1.15,0.,1.22,0.,.035]
     node.actual=[-.6,0.,0.,0.,0.,0.,0.]
     node.tick()
@@ -198,6 +237,10 @@ def test_cobra_approach_raises_with_base_held_then_rotates_before_capture(scan):
     node.tick()
     np.testing.assert_allclose(commands[-1][1:],raised[1:])
     assert -.6<commands[-1][0]<.8
+    if overhead_in_progress:
+        assert not calls
+        node.discovery['search'].update(state='wait_for_wrist_view',target='side')
+        node.discovery['next_survey_pose']=None
     node.actual=list(node.targets['side'])
     clock.now=node.started+node.active_duration+.01
     node.feedback_received=node.discovery_received=clock.now
@@ -267,16 +310,17 @@ def test_phase_profiles_cannot_exceed_global_motion_caps(scan):
     assert settings['max_joint_acceleration']==node.max_acceleration
 
 
-def test_quick_near_post_survey_uses_gentle_profile(scan):
+@pytest.mark.parametrize('stage',['near_post','coverage'])
+def test_posture_changing_survey_uses_gentle_profile(scan,stage):
     node,clock,commands,calls=scan
-    node.config['survey_stages']={'broad':[],'near_post':['side']}
+    node.config['survey_stages']={'broad':[],stage:['side']}
     node.discovery['view_request']={'request_id':'near','phase':'survey'}
     node.select_target=lambda _:node.targets['side']
-    node.motion_profiles={'near_post':{'move_seconds':3.,'settle_seconds':1.,
+    node.motion_profiles={stage:{'move_seconds':3.,'settle_seconds':1.,
         'max_joint_speed':.15,'max_joint_acceleration':.15,'max_joint_jerk':.3}}
     node.moved=True
     node.tick()
-    assert node.active_phase=='near_post'
+    assert node.active_phase==stage
     assert node.active_max_jerk==.3
     assert node.active_duration>=3.
     assert node.active_settle_seconds==1.

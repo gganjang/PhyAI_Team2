@@ -67,6 +67,7 @@ class Discovery:
             raise ValueError('candidate_focus must contain a boolean enabled setting.')
         self.focus = (CandidateFocus(focus.get('max_views_per_candidate', 3))
                       if focus.get('enabled', False) else None)
+        self.prefer_shared_views = focus.get('prefer_shared_views', False)
         self.inspection_outcomes = {}
         self.workspace = Workspace(frame=cfg.get('map_frame', 'base_link'),
             cell_size=cfg.get('cell_size', .02), scope=cfg.get('scope'),
@@ -125,7 +126,8 @@ class Discovery:
                          'yaw_bound_rad': criteria.max_yaw_uncertainty} if criteria else {})
         request = self.focus.request(session_id=self.workspace.session,
             generation=self.search.generation, viewpoint=self.search.target,
-            frame=self.workspace.frame, phase=phase, targets=targets, criteria=requirements)
+            frame=self.workspace.frame, phase=phase, targets=targets, criteria=requirements,
+            prefer_shared_views=self.prefer_shared_views)
         if request is None:
             reason = ('No pending candidate inspections; scene uncertainty is retained.' if not targets
                       else 'No feasible candidate views remain within the configured budgets; uncertainty is retained.')
@@ -219,6 +221,8 @@ class Discovery:
                                stop_reason='survey_complete')
         self._active_job = None
         if self.focus is not None:
+            if self.prefer_shared_views and job.capture.camera == 'wrist':
+                self.focus.last_wrist_position = job.capture.camera_to_map[:3,3].tolist()
             self.focus.retire()
         self._refresh_view_request()
         return True

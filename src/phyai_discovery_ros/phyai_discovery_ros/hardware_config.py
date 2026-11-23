@@ -178,6 +178,8 @@ def generate(config, directory, max_views=None, *, allow_partial=False):
     result.update(regions)
     model=mujoco.MjModel.from_xml_string(installation_xml(model_config))
     scan=result['scan']
+    coverage={label:scan['targets'][label] for label in result.get('survey_stages',{}).get('coverage',[])}
+    coverage_motion=scan.get('motion_profiles',{}).get('coverage')
     initial=options['installation']['reference_joints']
     compact=options.get('survey_motion',{}).get('strategy')=='compact_rotation'
     seeds=[initial] if compact else list(scan['targets'].values())
@@ -197,10 +199,10 @@ def generate(config, directory, max_views=None, *, allow_partial=False):
         proposal_only=True,include_overhead=True,map_rotation=rotation,usable_rgb=True,
         camera_intrinsics=options['installation']['cameras'],minimum_table_fraction=.4 if compact else .65,
         broad_radius=options['survey_motion'].get('broad_radius',.25) if compact else None,
-        allow_partial=allow_partial,excluded_radius=excluded_radius)
+        allow_partial=allow_partial or bool(coverage),excluded_radius=excluded_radius)
     targets=(order_rotation_sweep(planner,targets,initial,options['survey_motion'].get('max_base_step')) if compact
              else order_survey(planner,targets,initial))
-    if not near.get('enabled',False):
+    if not near.get('enabled',False) and not coverage:
         # Count every saved stop, including intermediate cobra angles. The
         # greedy key-view report otherwise understates broad-only coverage.
         _,report=generate_survey(model,scene,{},planner=planner,
@@ -242,12 +244,28 @@ def generate(config, directory, max_views=None, *, allow_partial=False):
             camera_intrinsics=options['installation']['cameras'],minimum_table_fraction=.65,
             prior_views=targets,overhead_pose=initial,near_radius=near.get('radius',.25),
             broad_radius=near.get('radius',.25),
-            allow_partial=allow_partial)
+            allow_partial=allow_partial or bool(coverage))
         extra=order_survey(near_planner,extra,targets[-1])
         stages['near_post']=[f'near_post_{i+1}' for i in range(len(extra))]
         labels+=stages['near_post'];targets+=extra
         report['broad_sweep']=broad_report
         report['minimum_table_image_fraction']=min(.4 if compact else .65,.65)
+    if coverage:
+        for label, q in coverage.items():
+            if (label in labels or len(q)!=7 or not 0<=q[6]<=.035
+                    or any(not low<=angle<=high for angle,(low,high) in zip(q[:6],scan['joint_limits']))
+                    or not planner._clear_path(targets[-1],q)):
+                raise ValueError(f'Saved coverage pose {label} is invalid for the regenerated survey.')
+            labels.append(label)
+            targets.append(q)
+        stages['coverage']=list(coverage)
+        _,report=generate_survey(model,scene,{},planner=planner,
+            origin=[*scene['post_position'],0.],initial=initial,overhead_pose=initial,
+            proposal_only=True,include_overhead=True,map_rotation=rotation,usable_rgb=True,
+            camera_intrinsics=options['installation']['cameras'],minimum_table_fraction=.35,
+            prior_views=targets,evaluate_only=True,allow_partial=allow_partial,
+            broad_radius=options['survey_motion'].get('broad_radius',.25) if compact else None,
+            excluded_radius=excluded_radius)
     result['viewpoints']=labels
     result['survey_stages']=stages
     scan['targets']=dict(zip(labels,targets))
@@ -259,6 +277,8 @@ def generate(config, directory, max_views=None, *, allow_partial=False):
             'candidate_inspection':{'move_seconds':3.,'settle_seconds':1.,
                                     'max_joint_speed':.15,'max_joint_acceleration':.15,
                                     'max_joint_jerk':.3}})
+    if coverage:
+        scan['motion_profiles']['coverage']=coverage_motion or scan['motion_profiles']['candidate_inspection'].copy()
     result['stationary_seconds']=.25
     result['view_planner']['survey_sample_count']=options.get('survey_sample_count',options.get('sample_count',20000))
     result['view_planner']['sample_count']=6000
@@ -268,7 +288,7 @@ def generate(config, directory, max_views=None, *, allow_partial=False):
     # measure the geometry used to confirm a block and its pose.
     result['detector']['proposal_only_viewpoints']=labels
     result['detector']['overhead_proposals_only']=True
-    result['candidate_focus']={'enabled':True,'max_views_per_candidate':4}
+    result['candidate_focus']={**(result.get('candidate_focus') or {}),'enabled':True,'max_views_per_candidate':4}
     result['inspection_rounds']=[[f'refine_{i+1}' for i in range(32)]]
     result['search_criteria']={'min_explored_fraction':.9,'min_resolved_views':2,
         'min_wrist_views':2,'max_position_uncertainty':.01,

@@ -51,6 +51,17 @@ def rgb_array(msg):
     return pixels
 
 
+def camera_intrinsics(info, rectified):
+    if not np.isfinite(list(info.d)).all():
+        raise ValueError('Invalid camera distortion calibration.')
+    if any(abs(d) > 1e-9 for d in info.d) and (not rectified or info.p[0] <= 0 or info.p[5] <= 0):
+        raise ValueError('Distorted image requires a rectified stream and calibrated projection matrix.')
+    p = info.p if rectified else [0.]*12
+    return Intrinsics(info.width,info.height,p[0] if p[0] > 0 else info.k[0],
+        p[5] if p[5] > 0 else info.k[4],p[2] if p[0] > 0 else info.k[2],
+        p[6] if p[5] > 0 else info.k[5])
+
+
 class DiscoveryNode(Node):
     def __init__(self, *, node_name='discovery', config_package='phyai_discovery_ros',
                  interface_prefix='discovery', inventory_name='workspace', **kwargs):
@@ -102,9 +113,23 @@ class DiscoveryNode(Node):
         self.detector = self.discovery.detector
         self.robot_mask_model=None
         self.robot_joint_history=deque(maxlen=600)
-        if self.config.get('view_planner',{}).get('robot_mask',False):
+        self.robot_base_in_map=None
+        self.truth_samples=deque(maxlen=300)
+        if self.capture_archive and not recording and self.config.get('ground_truth_topic'):
+            self.create_subscription(String,self.config['ground_truth_topic'],self.on_ground_truth,
+                QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        robot_mask=self.config.get('view_planner',{}).get('robot_mask',False)
+        if robot_mask and not recording:
             from .view_planner import RobotMaskModel
-            self.robot_mask_model=RobotMaskModel(self.config)
+            if isinstance(robot_mask,dict):
+                installation_path=config_path.parent/robot_mask['installation_config']
+                installation=json.loads(installation_path.read_text())
+                resolve_planner_paths(installation,installation_path.parent)
+                self.robot_mask_model=RobotMaskModel(installation, use_scene_base=True)
+                self.create_subscription(String,robot_mask['scene_topic'],self.on_robot_mask_scene,
+                    QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            else:
+                self.robot_mask_model=RobotMaskModel(self.config)
         self.rgb_only = self.config.get('detector', {}).get('backend') == 'rgb'
         self.stationarity = Stationarity(self.config.get('stationary_seconds',.5),
             self.config.get('stationary_tolerance',.003),self.config.get('feedback_timeout',1.))
@@ -234,6 +259,25 @@ class DiscoveryNode(Node):
                 self.discovery.set_stacking_zone(zone['stacking_zone_position'], frame=scene['frame_id'])
         except (ValueError,TypeError,KeyError):pass
 
+    def on_ground_truth(self,msg):
+        try:
+            scene=json.loads(msg.data)
+            sample={key:scene[key] for key in ('simulation_time','frame_id','blocks')}
+            if self.truth_samples and sample['simulation_time']<self.truth_samples[-1]['simulation_time']:
+                self.truth_samples.clear()
+            self.truth_samples.append(sample)
+        except (ValueError,TypeError,KeyError):
+            pass
+
+    def on_robot_mask_scene(self,msg):
+        try:
+            scene=json.loads(msg.data)
+            position=np.asarray(scene['robot']['base_position'],dtype=float)
+            if scene['frame_id']==self.workspace.frame and position.shape==(3,) and np.isfinite(position).all():
+                self.robot_base_in_map=position
+        except (ValueError,TypeError,KeyError):
+            pass
+
     def on_joints(self,msg):
         positions = dict(zip(msg.name,msg.position))
         try:
@@ -292,8 +336,15 @@ class DiscoveryNode(Node):
     def on_image(self,camera,msg):
         now = time.monotonic()
         self.last_source_received[camera] = now
-        if self.future is not None or not self.stationarity.ready(now):
+        moving_overhead = (camera == 'overhead' and self.config.get('overlap_overhead_capture')
+                           and self.rgb_only and self.robot_mask_model is not None)
+        if self.future is not None or (not moving_overhead and not self.stationarity.ready(now)):
             return  # no growing queue and no captures while the arm moves
+        if (camera == 'wrist' and self.config.get('overlap_survey_motion')
+                and self.search.state == SearchState.STATIONARY):
+            # Feedback is already settled. Process this frame instead of
+            # discarding it while waiting for the simulation-clock timer.
+            self.discovery.tick(now,stationary=True)
         if camera == 'overhead' and self.search.state != SearchState.OVERHEAD:
             return
         if camera == 'wrist' and self.search.state != SearchState.CAPTURE:
@@ -312,16 +363,7 @@ class DiscoveryNode(Node):
             if info.header.frame_id != msg.header.frame_id or (info.width,info.height) != (msg.width,msg.height):
                 raise ValueError('Image and CameraInfo frame/dimensions differ.')
             cfg = self.config['cameras'][camera]
-            if not np.isfinite(list(info.d)).all():
-                raise ValueError('Invalid camera distortion calibration.')
-            distorted = any(abs(d) > 1e-9 for d in info.d)
-            rectified = cfg.get('rectified',True)
-            if distorted and (not rectified or info.p[0] <= 0 or info.p[5] <= 0):
-                raise ValueError('Distorted image requires a rectified stream and calibrated projection matrix.')
-            p = info.p if rectified else [0.]*12
-            k = Intrinsics(info.width,info.height,p[0] if p[0] > 0 else info.k[0],
-                p[5] if p[5] > 0 else info.k[4],p[2] if p[0] > 0 else info.k[2],
-                p[6] if p[5] > 0 else info.k[5])
+            k = camera_intrinsics(info,cfg.get('rectified',True))
             depth = None if self.rgb_only else decode_depth(
                 msg.data,msg.width,msg.height,msg.step,msg.encoding,
                 bool(msg.is_bigendian),cfg.get('depth_scale',.001))
@@ -349,7 +391,8 @@ class DiscoveryNode(Node):
                 camera_to_map(self.config,transform_matrix(tf)),self.search.target,roi=tuple(cfg['roi']) if cfg.get('roi') else None,
                 mask=mask,rgb=rgb_pixels)
             if self.robot_mask_model is not None:
-                projected=self.robot_mask_model.project(capture,self.robot_joint_history)
+                projected=self.robot_mask_model.project(capture,self.robot_joint_history,
+                                                        base_in_map=self.robot_base_in_map)
                 capture=replace(capture,mask=projected if mask is None else mask | projected)
             self.pending_depth.pop(camera,None)
             self.submit(capture)
@@ -366,6 +409,24 @@ class DiscoveryNode(Node):
         self.job_started = time.monotonic()
         self.future = self.worker.submit(self.detector.detect,self.job.capture)
         self.last_error = None
+        if self.config.get('overlap_survey_motion') and capture.camera == 'wrist':
+            self.publish_progress()
+
+    def skip_overhead_covered_survey(self):
+        info = self.info.get('wrist')
+        if info is None or self.robot_mask_model is None:
+            return
+        try:
+            intrinsics = camera_intrinsics(info,self.config['cameras']['wrist'].get('rectified',True))
+            intrinsics.validate()
+            skipped = self.robot_mask_model.covered_survey_views(
+                self.workspace,intrinsics,self.config.get('survey_stages',{}).get('broad',[]),
+                self.config['scan']['targets'],self.robot_base_in_map,self.config['detector']['known_block_size'])
+            if skipped:
+                self.search.skip_covered_survey_views(skipped)
+                self.get_logger().info('Overhead already covered survey stops '+', '.join(skipped))
+        except (KeyError,ValueError) as error:
+            self.get_logger().warning(f'Keeping full wrist survey because coverage could not be checked. {error}')
 
     def report_view_service(self, request, response):
         try:
@@ -440,6 +501,10 @@ class DiscoveryNode(Node):
                 self.detection_samples.setdefault(job.capture.camera, deque(maxlen=120)).append(finished)
                 self.detection_totals[job.capture.camera] = self.detection_totals.get(job.capture.camera, 0)+1
                 if self.discovery.complete(job,detection):
+                    if job.capture.camera == 'overhead' and self.config.get('skip_overhead_covered_survey'):
+                        self.skip_overhead_covered_survey()
+                    if self.config.get('overlap_survey_motion'):
+                        self.publish_progress()
                     self.publish_overlay(job.capture,detection)
                     self.publish_capture_diagnostics(job.capture,detection)
             except Exception as error:
@@ -491,7 +556,12 @@ class DiscoveryNode(Node):
                 session_id=self.workspace.session,revision=self.workspace.revision,
                 phase='candidate_inspection' if capture.inspection_target else 'overview' if capture.camera=='overhead' else 'survey',
                 focus=capture.inspection_target)
-            if self.capture_archive:self.capture_archive.capture(packet)
+            if self.capture_archive:
+                archived=packet
+                if self.truth_samples:
+                    truth=min(self.truth_samples,key=lambda item:abs(item['simulation_time']-capture.stamp))
+                    archived={**packet,'ground_truth':truth}
+                self.capture_archive.capture(archived)
             self.accepted_capture_pub.publish(String(data=json.dumps(packet,allow_nan=False)))
         except (OSError,ValueError,TypeError) as error:
             self.get_logger().error('Cannot preserve accepted-image diagnostics: '+str(error))
@@ -525,6 +595,18 @@ class DiscoveryNode(Node):
         mode='live' if self.recording_entries is None else 'recorded'
         progress = self.search.progress()
         tracks = self.workspace.hypotheses
+        next_survey_pose = None
+        if (self.config.get('overlap_survey_motion') and mode == 'live'
+                and self.future is not None and self.search.state == SearchState.PROCESSING
+                and self.job.generation == self.search.generation
+                and self.job.capture.camera == 'wrist' and not self.search.inspection_round
+                and self.search.index + 1 < len(self.search.base_viewpoints)):
+            next_survey_pose = self.search.base_viewpoints[self.search.index + 1]
+        if (self.config.get('overlap_overhead_capture') and self.config.get('overlap_survey_motion')
+                and mode == 'live' and self.rgb_only and self.robot_mask_model is not None
+                and (self.search.state == SearchState.OVERHEAD or
+                     (self.search.state == SearchState.PROCESSING and self.search.processing_camera == 'overhead'))):
+            next_survey_pose = self.search.base_viewpoints[0]
         if self.search.state == SearchState.FINISHED:
             final = self.discovery.snapshot()
             progress = final['search']
@@ -533,6 +615,8 @@ class DiscoveryNode(Node):
             'workspace':{'session_id':self.workspace.session,
                          'inspection_targets':inspection_targets(tracks,progress['assessment'])},
             'search':progress,'view_request':self.discovery.view_request(),
+            'next_survey_pose':next_survey_pose,
+            'robot_base_in_map':self.robot_base_in_map.tolist() if self.robot_base_in_map is not None else None,
             'candidate_focus':self.discovery.focus.snapshot() if self.discovery.focus is not None else None,
             'discovery_progress':self.candidate_progress(),'input_mode':mode,'last_error':self.last_error,
             'sim_restart_id':self.sim_restart_id})))

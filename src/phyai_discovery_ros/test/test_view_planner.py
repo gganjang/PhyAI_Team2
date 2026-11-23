@@ -134,7 +134,8 @@ def test_hardware_survey_has_broad_coverage_clear_paths_and_focused_views():
     assert len(stages['broad'])<=compact.get('max_views',32)
     assert stages['near_post']==[]
     assert not config['view_planner']['near_post_survey']['enabled']
-    assert config['viewpoints']==stages['broad']+stages['near_post']
+    assert config['viewpoints']==stages['broad']+stages['near_post']+stages['coverage']
+    assert config['scan']['motion_profiles']['coverage']==config['scan']['motion_profiles']['candidate_inspection']
     assert config['discovery_mode']=='full'
     azimuths=np.array([config['scan']['targets'][label][0] for label in stages['broad']])
     assert np.all(np.diff(azimuths)>=0) or np.all(np.diff(azimuths)<=0)
@@ -161,7 +162,7 @@ def test_hardware_survey_has_broad_coverage_clear_paths_and_focused_views():
         assert all(low<=angle<=high for angle,(low,high) in zip(target[:6],config['scan']['joint_limits']))
         assert target[6]==.035
         eye,axes=planner.pose(target);positions.append(eye);rotations.append(axes)
-        stage=compact if label in stages['broad'] else config['view_planner']['near_post_survey']
+        stage=config['view_planner']['near_post_survey'] if label in stages['near_post'] else compact
         low,high=stage['camera_height_range']
         assert low<=eye[2]<=high
         import mujoco
@@ -171,7 +172,8 @@ def test_hardware_survey_has_broad_coverage_clear_paths_and_focused_views():
         forward=-axes[:,2]
         centre=eye+(.015-eye[2])/forward[2]*forward
         from phyai_discovery.coordinates import map_origin
-        assert inside_polygon((centre-map_origin(config))[:2],config['table_polygon'])
+        if label not in stages['coverage']:
+            assert inside_polygon((centre-map_origin(config))[:2],config['table_polygon'])
         current=target
     scene=json.loads(Path(config['view_planner']['scene_config']).read_text())
     _,rotation=table_regions(scene)
@@ -180,6 +182,7 @@ def test_hardware_survey_has_broad_coverage_clear_paths_and_focused_views():
     assert min(fractions)>=config['survey_coverage']['minimum_table_image_fraction']
     # Inspect a candidate in the final broad view without requiring a large
     # camera flip or a near-post transit that is no longer part of the scan.
+    current=config['scan']['targets'][stages['broad'][-1]]
     eye,axes=planner.pose(current);forward=-axes[:,2]
     point=eye+(.0075-eye[2])/forward[2]*forward
     focus={'id':'measured_probe','position':point.tolist(),
@@ -310,6 +313,42 @@ def test_tabletop_translation_preserves_hardware_robot_mask_pixels():
     from dataclasses import replace
     mapped=replace(base_capture,map_frame='tabletop',camera_to_map=camera_to_map(config,transform))
     np.testing.assert_array_equal(model.project(mapped,[(100.,q)]),expected)
+
+    simulator_model=RobotMaskModel(config,use_scene_base=True)
+    base_in_world=np.array([-.0655,.0655,0.])
+    camera_to_world=transform.copy()
+    camera_to_world[:3,3]+=base_in_world
+    world_capture=replace(base_capture,map_frame='world',camera_to_map=camera_to_world)
+    with pytest.raises(ValueError,match='simulator robot base position'):
+        simulator_model.project(world_capture,[(100.,q)])
+    np.testing.assert_array_equal(
+        simulator_model.project(world_capture,[(100.,q)],base_in_map=base_in_world),expected)
+
+
+@pytest.mark.parametrize('use_scene_base',[False,True])
+def test_overhead_coverage_skip_keeps_sweep_endpoints_and_unknown_cells(use_scene_base):
+    import numpy as np
+    from phyai_discovery import Intrinsics
+    from phyai_discovery.coordinates import map_origin
+    from phyai_discovery.workspace import Workspace
+    from phyai_discovery_ros.view_planner import RobotMaskModel
+    config=hardware_config()
+    model=RobotMaskModel(config,use_scene_base=use_scene_base)
+    broad=['sweep_5','sweep_7','sweep_9']
+    targets=config['scan']['targets']
+    workspace=Workspace(scope=(-.84,.84,-.5,.5))
+    workspace.coverage={(x,y):{'state':'observed','last_observed':1.,'camera':'overhead','explored':True}
+                        for x in range(-42,42) for y in range(-25,25)}
+    intrinsics=Intrinsics(640,480,620.,620.,320.,240.)
+    base=np.array([-.0655,.0655,0.]) if use_scene_base else -map_origin(config)
+    assert model.covered_survey_views(workspace,intrinsics,broad,targets,base,[.075,.025,.015])==['sweep_7']
+
+    camera=model.data.camera('wrist')
+    ray=-camera.xmat.reshape(3,3)[:,2]
+    centre=camera.xpos+base-ray*camera.xpos[2]/ray[2]
+    cell=tuple(np.floor(centre[:2]/workspace.cell_size).astype(int))
+    del workspace.coverage[cell]
+    assert model.covered_survey_views(workspace,intrinsics,broad,targets,base,[.075,.025,.015])==[]
 
 
 def test_hardware_reframing_preserves_piper_l_inertia_and_host_gripper_parents():

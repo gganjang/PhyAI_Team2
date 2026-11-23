@@ -1,5 +1,6 @@
 """Robot-independent candidate inspection policy and stable view requests."""
 from copy import deepcopy
+import math
 import uuid
 
 
@@ -17,8 +18,10 @@ class CandidateFocus:
         self.unavailable = {}
         self.current = None
         self.key = None
+        self.last_wrist_position = None
 
-    def request(self, *, session_id, generation, viewpoint, frame, phase, targets, criteria):
+    def request(self, *, session_id, generation, viewpoint, frame, phase, targets, criteria,
+                prefer_shared_views=False):
         key = (session_id, generation, viewpoint)
         if self.current is not None and self.key == key:
             return self.current
@@ -37,7 +40,11 @@ class CandidateFocus:
             focus = next((t for t in pool if t['candidate_id'] == self.candidate
                           and count(t)<initial_views), None)
             if focus is None and pool:
-                focus = min(pool, key=lambda t: (count(t)//initial_views,-t['priority'],count(t),t['candidate_id']))
+                def order(t):
+                    travel = (math.dist(self.last_wrist_position[:2],t['position'][:2])
+                              if prefer_shared_views and self.last_wrist_position is not None else 0.)
+                    return count(t)//initial_views,-t['priority'],count(t),travel,t['candidate_id']
+                focus = min(pool, key=order)
             if focus is None:
                 self.current = None
                 self.key = None
@@ -50,6 +57,8 @@ class CandidateFocus:
             'camera': 'wrist', 'frame': frame, 'phase': phase,
             'focus': deepcopy(focus), 'criteria': deepcopy(criteria),
         }
+        if prefer_shared_views and focus is not None:
+            self.current['companions'] = deepcopy([t for t in targets if t['candidate_id'] != focus['candidate_id']])
         return self.current
 
     def started(self):

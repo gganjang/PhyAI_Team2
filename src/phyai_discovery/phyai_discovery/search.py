@@ -49,14 +49,14 @@ class Search:
             raise ValueError('Invalid search configuration.')
         from .criteria import SearchCriteria
         self.criteria = SearchCriteria(**criteria) if isinstance(criteria,dict) else criteria
-        self.base_viewpoints = tuple(viewpoints)
+        self.configured_viewpoints = tuple(viewpoints)
         self.inspection_rounds = tuple(tuple(views) for views in inspection_rounds)
-        labels = list(self.base_viewpoints) + [view for views in self.inspection_rounds for view in views]
+        labels = list(self.configured_viewpoints) + [view for views in self.inspection_rounds for view in views]
         if any(not views for views in self.inspection_rounds) or len(set(labels)) != len(labels):
             raise ValueError('Inspection rounds require unique new physical viewpoint labels.')
         if any(not isinstance(v,str) or not v or v=='overhead' for v in labels):
             raise ValueError('Invalid inspection viewpoint label.')
-        self.workspace, self.viewpoints = workspace, self.base_viewpoints
+        self.workspace = workspace
         self.max_retries, self.timeout = max_retries, capture_timeout
         self.processing_timeout = capture_timeout if processing_timeout is None else processing_timeout
         if not math.isfinite(self.processing_timeout) or self.processing_timeout <= 0:
@@ -72,7 +72,9 @@ class Search:
         self.reset()
 
     def reset(self):
+        self.base_viewpoints = self.configured_viewpoints
         self.viewpoints = self.base_viewpoints
+        self.skipped_survey_views = ()
         self.inspection_round = 0
         self.no_progress_rounds = 0
         self.assessment = None
@@ -86,6 +88,15 @@ class Search:
         self.pending_since = None
         self.generation = getattr(self, 'generation', 0)+1
         self.result = None
+
+    def skip_covered_survey_views(self, labels):
+        """Prune the pending survey just after overhead, preserving its first move."""
+        if self.state != SearchState.WRIST or self.index != 0 or self.accepted != 1 or not self.use_overhead:
+            raise ValueError('Survey skips require an accepted overhead capture before the first wrist capture.')
+        labels = set(labels).union(self.skipped_survey_views)
+        self.skipped_survey_views = tuple(view for view in self.configured_viewpoints[1:] if view in labels)
+        self.base_viewpoints = tuple(view for view in self.configured_viewpoints if view not in self.skipped_survey_views)
+        self.viewpoints = self.base_viewpoints
 
     @property
     def target(self):
@@ -224,5 +235,6 @@ class Search:
                 'viewpoint_count': len(self.viewpoints), 'target': self.target,
                 'accepted': self.accepted, 'rejected': self.rejected,
                 'attempts': self.attempts, 'reason': self.reason, 'result': self.result,
+                'skipped_survey_views': list(self.skipped_survey_views),
                 'inspection_round':self.inspection_round,'inspection_round_limit':len(self.inspection_rounds),
                 'assessment':self.assessment}

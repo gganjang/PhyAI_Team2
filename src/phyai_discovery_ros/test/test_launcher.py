@@ -11,6 +11,29 @@ import pytest
 ROOT=Path(__file__).resolve().parents[3]
 
 
+def test_isaac_launcher_uses_the_hardware_survey_route(tmp_path):
+    scripts=tmp_path/'scripts'
+    scripts.mkdir()
+    shutil.copy2(ROOT/'scripts/run_discovery_isaac.sh',scripts)
+    (scripts/'run_discovery.sh').write_text('exit 0\n')
+    configs=tmp_path/'src/phyai_discovery_ros/config'
+    configs.mkdir(parents=True)
+    for name in ('discovery.json','isaac_interface.json'):
+        shutil.copy2(ROOT/'src/phyai_discovery_ros/config'/name,configs)
+    runtime=tmp_path/'runtime'
+    env=dict(os.environ,PHYAI_SAM2_RUNTIME_DIR=str(runtime))
+    env.pop('PHYAI_ISAAC_SKIP_COVERED_SURVEY',None)
+    subprocess.run(['bash',str(scripts/'run_discovery_isaac.sh')],env=env,check=True)
+    hardware=json.loads((configs/'discovery.json').read_text())
+    isaac=json.loads((runtime/'isaac-cobra-input.json').read_text())
+    for key in ('viewpoints','survey_stages','candidate_focus','overlap_survey_motion',
+                'overlap_overhead_capture','skip_overhead_covered_survey'):
+        assert isaac[key]==hardware[key]
+    assert isaac['scan']['targets']==hardware['scan']['targets']
+    assert isaac['scan']['motion_profiles']['candidate_inspection']['max_joint_speed']>.15
+    assert hardware['scan']['motion_profiles']['coverage']['max_joint_speed']==.15
+
+
 @pytest.mark.parametrize('mode',['installed','missing','forced','override','build_failure','hardware_planner','yolo26'])
 def test_discovery_launcher_workspace_bootstrap(tmp_path,mode):
     repo=tmp_path/'repo';scripts=repo/'scripts';scripts.mkdir(parents=True)

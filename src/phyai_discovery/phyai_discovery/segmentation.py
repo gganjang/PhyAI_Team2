@@ -1,4 +1,5 @@
 """Segmentation backends; model runtimes are loaded once per detector."""
+from contextlib import nullcontext
 from pathlib import Path
 import os
 
@@ -7,7 +8,8 @@ import numpy as np
 
 class SAM2Segmenter:
     def __init__(self, checkpoint, model_config='configs/sam2.1/sam2.1_hiera_t.yaml',
-                 device='cuda', min_score=.7, points_per_side=32):
+                 device='cuda', min_score=.7, points_per_side=32, survey_points_per_side=None,
+                 use_bfloat16=False):
         try:
             import torch
             from sam2.build_sam import build_sam2
@@ -26,7 +28,10 @@ class SAM2Segmenter:
         self.predictor = SAM2ImagePredictor(self.model)
         self.min_score = min_score
         self.points_per_side = points_per_side
-        self.generator = None
+        self.survey_points_per_side = points_per_side if survey_points_per_side is None else survey_points_per_side
+        self.use_bfloat16 = (use_bfloat16 and str(device).split(':', 1)[0] == 'cuda'
+                            and torch.cuda.is_bf16_supported(including_emulation=False))
+        self.generators = {}
 
     def propose(self, rgb):
         """Unprompted instance masks from a point grid; no colour or count prior.
@@ -34,13 +39,21 @@ class SAM2Segmenter:
         Masks cover every segmentable region (table tiles, robot, blocks);
         callers decide which regions are blocks from calibrated geometry.
         """
-        if self.generator is None:
+        return self._propose(rgb,self.points_per_side)
+
+    def propose_survey(self, rgb):
+        return self._propose(rgb,self.survey_points_per_side)
+
+    def _propose(self,rgb,points_per_side):
+        if points_per_side not in self.generators:
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-            self.generator = SAM2AutomaticMaskGenerator(
-                self.model, points_per_side=self.points_per_side,
+            self.generators[points_per_side] = SAM2AutomaticMaskGenerator(
+                self.model, points_per_side=points_per_side,
                 pred_iou_thresh=self.min_score, stability_score_thresh=.9)
-        with self.torch.inference_mode():
-            regions = self.generator.generate(np.array(rgb, copy=True, order='C'))
+        precision = (self.torch.autocast('cuda', dtype=self.torch.bfloat16)
+                     if self.use_bfloat16 else nullcontext())
+        with self.torch.inference_mode(), precision:
+            regions = self.generators[points_per_side].generate(np.array(rgb, copy=True, order='C'))
         return [region['segmentation'].astype(bool) for region in regions]
 
     def segment(self, capture, pixels, groups):
@@ -97,4 +110,5 @@ def make_segmenter(config):
     return SAM2Segmenter(checkpoint,
         config.get('model_config','configs/sam2.1/sam2.1_hiera_t.yaml'),
         config.get('device','cuda'), config.get('min_score',.7),
-        config.get('points_per_side',32))
+        config.get('points_per_side',32),config.get('survey_points_per_side'),
+        config.get('use_bfloat16',False))
