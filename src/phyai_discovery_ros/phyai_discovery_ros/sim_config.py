@@ -57,9 +57,12 @@ def main():
                               'robot_path': str(args.robot.resolve()),
                               'scene_config': str(args.scene.resolve())}
     config['scan']['joint_limits'] = [model.joint(f'joint{i}').range.tolist() for i in range(1, 7)]
-    if any(not low <= angle <= high for target in config['scan']['targets'].values()
-           for angle, (low, high) in zip(target[:6], config['scan']['joint_limits'])):
-        parser.error('A saved survey pose exceeds the current robot joint limits. Regenerate the survey.')
+    for label, target in config['scan']['targets'].items():
+        for index, (angle, (low, high)) in enumerate(zip(target[:6], config['scan']['joint_limits']), 1):
+            if not low <= angle <= high:
+                parser.error(f'Saved survey pose {label}, joint{index}={angle} exceeds '
+                             f'the current robot limits [{low}, {high}]. Run '
+                             'python3 apps/junh/examples/plan_survey.py --write first.')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(config, indent=2) + '\n')
     print(f'Synced {len(config["viewpoints"])} survey poses from {args.survey}')

@@ -249,19 +249,53 @@ Restart keeps active scene settings and does not save or reload the JSON file.
 
 Use the printed URL if you set another port. Rendering uses offscreen GPU/EGL and streams video;
 no desktop display is needed. The simulator is development-only. The browser includes virtual camera views. Enable `publish_cameras:=true` to publish rendered RGB-D, CameraInfo, and camera/base transforms on `/tf` for perception apps.
-Its model comes from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/agilex_piper).
+The hardware is **PiPER-L**. The dev image builds its MJCF from the
+[official AgileX PiPER-L URDF and meshes](https://github.com/agilexrobotics/agx_arm_urdf/tree/main/piper_l),
+pinned to `680fa925cd00db7e2628563d2edc5540963045de` by `PIPER_URDF_COMMIT` in
+[docker/Dockerfile](../docker/Dockerfile). The former standard PiPER Menagerie model had shorter links
+and different joint limits. Rebuild the dev container to install the corrected model.
+
+[build_piper_l.py](../sim/models/build_piper_l.py) converts the official arm and gripper descriptions:
+URDF origins, axes, limits, masses and inertia tensors; colored COLLADA visuals split into OBJ meshes;
+and STL collision meshes (MuJoCo convex hulls). It retains the Menagerie position gains, friction,
+armature and gravity compensation as simulator tuning, rather than measured PiPER-L dynamics.
+The ROS interface remains `joint1`–`joint8`, with the `gripper` actuator controlling `joint7` and
+`joint8 = -joint7`. Commands use **half the opening width**, as before; the official finger range is
+now 0–0.05 m. Existing 0.035 m scan commands remain within that range.
+
+The historical `/opt/mujoco_menagerie/agilex_piper/piper.xml` path now contains the generated PiPER-L,
+with `provenance.json` and the upstream license beside it. It does not refer to an updated upstream
+Menagerie release. Isaac assets require separate validation before use.
+
+To generate and validate assets outside Docker (with a checkout at the pinned revision):
+
+```bash
+python3 -m pip install mujoco==3.14.0 -r sim/models/requirements.txt
+python3 sim/models/build_piper_l.py --source /path/to/agx_arm_urdf \
+  --output /tmp/piper_l --revision 680fa925cd00db7e2628563d2edc5540963045de
+PIPER_TEST_ROBOT=/tmp/piper_l/piper.xml PYTHONPATH=sim/piper_mujoco_sim \
+  python3 -m pytest -q sim/piper_mujoco_sim/test/test_piper_l.py \
+  sim/piper_mujoco_sim/test/test_scene_editor.py sim/piper_mujoco_sim/test/test_scatter.py
+```
+
+The wrist camera still attaches rigidly to `link5`; its zero-roll reference now composes the official
+fixed flange and gripper-base transforms and the explicit `wrist_mount_frame` site, which preserves
+the lab convention (+X above the casing, +Y toward the fingertips). Camera calibration, home poses and recorded scan targets
+were fitted using the old model and must be checked against the physical PiPER-L before hardware use.
+The generated MJCF preserves the official joint frames, including the base/zero-pose orientation.
 
 ### Lab scene and camera views
 
-The default scene contains four 84 × 54 cm black tabletops in a 2 × 2 layout,
-a PIPER arm mounted near the combined table center, and movable 7.5 × 2.5 × 1.5 cm blocks; the current count is set in `block_positions`.
+The default scene contains four 84 × 50 cm black tabletops in a 2 × 2 layout,
+a PiPER-L arm mounted near the combined table center, and movable 7.5 × 2.5 × 1.5 cm blocks; the current count is set in `block_positions`.
 Open the browser and select **Overview**, **Overhead camera**, or **Wrist camera**.
 The overview includes an X/Y/Z orientation gizmo; the overhead view shows X/Y.
 The arrows indicate positive world directions: X red, Y green, and Z blue.
 The overhead lens is 89 cm above the tabletop at X = +14 cm and Y = +51 cm relative to the
 combined table center, tilted 19° from vertical back toward the robot, with a 33° vertical field of view.
-The arm starts in `home_joints` (joint1-6, rad), the lab's start pose with the gripper pointing
-along +Y (parallel to the table seam at X = 0). Both were fitted to lab photos on 2026-10-30 and are estimates. The wrist camera follows the arm casing (`link5`).
+The arm starts in `home_joints` (joint1-6, rad). The stored joint pose and camera mount were fitted
+to lab photos on 2026-10-30 with the former standard PiPER model and remain estimates requiring
+PiPER-L calibration. The wrist camera follows the arm casing (`link5`).
 These are ideal RGB browser views, not an SR305 sensor/noise simulation or ROS RGB-D streams.
 Four overhead lights, ambient room fill, and camera-facing fill illuminate the scene.
 The `lighting` settings in `lab_scene.json` control ceiling height above the tabletop
@@ -271,16 +305,15 @@ the browser **Restart simulation** button only resets the robot and blocks.
 
 Edit [lab_scene.json](../sim/piper_mujoco_sim/config/lab_scene.json) to adjust the layout.
 All distances are in meters. The world origin is the combined tabletop center; +Z points up,
-+X follows the 168 cm dimension, and +Y follows the 108 cm dimension.
++X follows the 168 cm dimension, and +Y follows the 100 cm dimension.
 The robot base and post center are configured by `post_position` in that frame. The overhead lens uses `overhead_position` in the same frame.
 The 1 mm gap, 75 cm table height, 4 cm post radius, robot heading, 20 g block mass,
 friction, and exact wrist pose are initial estimates.
-The lab PIPER has a longer arm than the Menagerie model: upper arm 338 mm and forearm 322 mm
-(measured 33.8 / 32 cm) instead of 285 / 252 mm. `arm_geometry` in `lab_scene.json` stretches the model
-to match (`link3_pos`, `link4_pos` and a small joint2/joint3 zero turn), so the same joint readings put
-the gripper where the real one goes; the robot firmware's end pose agrees to 1.4 mm. The upper-arm and
-forearm meshes are stretched along the link. Without `arm_geometry` the model is the standard arm.
-The Isaac simulator keeps its converted standard-arm USD and prints a warning when the setting is present.
+The lab scene preserves the official PiPER-L link transforms, joint zero positions,
+visual meshes, and collision meshes. The legacy `arm_geometry` override was fitted to
+standard Menagerie frames and must be removed from older scene configurations;
+the scene builder rejects it to prevent deforming PiPER-L. Regenerate and validate
+old standard-arm assets separately before using them with Isaac.
 
 The camera assembly is rigidly attached to the arm casing (`link5`), before the rotating
 `joint6`. Mount coordinates use `gripper_root_mount`, a reference frame aligned with

@@ -36,6 +36,7 @@ class Capture:
     rgb: Optional[np.ndarray] = None
     roi: Optional[tuple] = None  # pixel x0, y0, x1, y1
     mask: Optional[np.ndarray] = None  # True means exclude (robot/contamination)
+    inspection_target: Optional[dict] = None
 
     def validate(self):
         self.intrinsics.validate()

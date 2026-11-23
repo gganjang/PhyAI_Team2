@@ -1,8 +1,8 @@
-"""The lab PIPER is a long-arm PIPER (upper arm 338 mm, forearm 322 mm); lab_scene.json matches the model to it."""
+"""Composing the lab must preserve the official PiPER-L arm and mesh geometry."""
 import json
-import math
 import os
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -10,80 +10,68 @@ import pytest
 
 from piper_mujoco_sim.scene import build_scene
 
-
 ROBOT = Path(os.environ.get('PIPER_TEST_ROBOT', '/opt/mujoco_menagerie/agilex_piper/piper.xml'))
 LAB = Path(__file__).parents[1] / 'config/lab_scene.json'
-pytestmark = pytest.mark.skipif(not ROBOT.exists(), reason='Menagerie PIPER model is required')
-
-# Modified DH (piper_sdk C_PiperForwardKinematics layout) that reproduces the lab robot's firmware end pose:
-# a2/d4 fitted to the firmware (338.2 / 320.8 mm; measured 33.8 / 32 cm), the SDK's joint2/joint3 offsets.
-LAB_DH = {'a': [0, 0, .3382, -.0225, 0, 0], 'd': [.123, 0, 0, .3208, 0, .091],
-          'theta': [0, math.radians(-172.16), math.radians(-102.72), 0, 0, 0]}
-# piper_sdk's standard arm (dh_is_offset=0), which the Menagerie model follows
-SDK_DH = {'a': [0, 0, .28503, -.02198, 0, 0], 'd': [.123, 0, 0, .25075, 0, .091],
-          'theta': [0, math.radians(-174.22), math.radians(-100.78), 0, 0, 0]}
-ALPHA = [0, -math.pi/2, 0, math.pi/2, -math.pi/2, math.pi/2]
 
 
-def dh_flange(q, dh):
-    pose = np.eye(4)
-    for i in range(6):
-        ca, sa = math.cos(ALPHA[i]), math.sin(ALPHA[i])
-        ct, st = math.cos(q[i] + dh['theta'][i]), math.sin(q[i] + dh['theta'][i])
-        d, a = dh['d'][i], dh['a'][i]
-        pose = pose @ np.array([[ct, -st, 0, a], [st*ca, ct*ca, -sa, -sa*d], [st*sa, ct*sa, ca, ca*d], [0, 0, 0, 1]])
-    return pose
+@pytest.fixture(scope='module')
+def models():
+    if not ROBOT.exists():
+        pytest.skip('Built PiPER-L assets required')
+    if ET.parse(ROBOT).getroot().get('model') != 'piper_l_description':
+        pytest.fail('Geometry tests require the generated official PiPER-L model')
+    return (mujoco.MjModel.from_xml_path(str(ROBOT)),
+            mujoco.MjModel.from_xml_string(build_scene(ROBOT, LAB)))
 
 
-def link6_in_base(model, data, q):
-    data.qpos[[model.joint(f'joint{i}').qposadr[0] for i in range(1, 7)]] = q
-    mujoco.mj_kinematics(model, data)
-    base, link6 = data.body('base_link'), data.body('link6')
-    rotation = base.xmat.reshape(3, 3)
-    return rotation.T @ link6.xmat.reshape(3, 3), rotation.T @ (link6.xpos - base.xpos)
+def test_lab_scene_preserves_link_poses_in_robot_base(models):
+    """Catch legacy frame/zero changes across the arm's joint range, including home."""
+    robot, lab = models
+    states = [mujoco.MjData(model) for model in models]
+    limits = robot.jnt_range[[robot.joint(f'joint{i}').id for i in range(1, 7)]]
+    poses = [np.zeros(6), np.array(json.loads(LAB.read_text())['home_joints']),
+             *np.random.default_rng(0).uniform(limits[:, 0], limits[:, 1], (60, 6))]
+    for q in poses:
+        for model, data in zip(models, states):
+            for i, angle in enumerate(q, 1):
+                data.qpos[model.joint(f'joint{i}').qposadr[0]] = angle
+            mujoco.mj_kinematics(model, data)
+        for i in range(1, 9):
+            local = []
+            for data in states:
+                base, link = data.body('base_link'), data.body(f'link{i}')
+                rotation = base.xmat.reshape(3, 3)
+                local.append((rotation.T @ (link.xpos-base.xpos),
+                              rotation.T @ link.xmat.reshape(3, 3)))
+            for expected, actual in zip(local[0], local[1]):
+                np.testing.assert_allclose(actual, expected, atol=1e-10)
 
 
-def worst_error(config_path, dh, samples=60):
-    model = mujoco.MjModel.from_xml_string(build_scene(ROBOT, config_path))
-    data = mujoco.MjData(model)
-    limits = model.jnt_range[[model.joint(f'joint{i}').id for i in range(1, 7)]]
-    rng = np.random.default_rng(0)
-    position = angle = 0.
-    for q in rng.uniform(limits[:, 0], limits[:, 1], (samples, 6)):
-        rotation, origin = link6_in_base(model, data, q)
-        target = dh_flange(q, dh)
-        position = max(position, np.linalg.norm(origin - target[:3, 3]))
-        cosine = (np.trace(rotation.T @ target[:3, :3]) - 1)/2
-        angle = max(angle, math.degrees(math.acos(min(1., max(-1., cosine)))))
-    return position, angle
+def test_lab_scene_preserves_arm_meshes_and_collision_geometry(models):
+    robot, lab = models
+    # Compiled mesh coordinates capture baked scale changes as well as source meshes.
+    for i in range(robot.nmesh):
+        name = mujoco.mj_id2name(robot, mujoco.mjtObj.mjOBJ_MESH, i)
+        source, scene = robot.mesh(name), lab.mesh(name)
+        count = int(source.vertnum[0])
+        assert scene.vertnum[0] == count
+        a, b = int(source.vertadr[0]), int(scene.vertadr[0])
+        np.testing.assert_allclose(lab.mesh_vert[b:b+count], robot.mesh_vert[a:a+count], atol=1e-10)
+    for body_id in range(1, robot.nbody):
+        name = mujoco.mj_id2name(robot, mujoco.mjtObj.mjOBJ_BODY, body_id)
+        source = np.flatnonzero(robot.geom_bodyid == body_id)
+        scene = np.flatnonzero(lab.geom_bodyid == lab.body(name).id)
+        assert len(scene) == len(source)
+        for attr in ('geom_pos', 'geom_quat', 'geom_size', 'geom_rbound', 'geom_contype', 'geom_conaffinity'):
+            np.testing.assert_allclose(getattr(lab, attr)[scene], getattr(robot, attr)[source], atol=1e-10)
 
 
-def test_lab_scene_follows_the_lab_arm():
-    position, angle = worst_error(LAB, LAB_DH)
-    assert position < .002 and angle < .01
-
-
-def test_without_arm_geometry_the_model_is_the_standard_arm(tmp_path):
+def test_old_scene_override_is_rejected_instead_of_deforming_robot(tmp_path):
     config = json.loads(LAB.read_text())
-    config.pop('arm_geometry')
-    path = tmp_path / 'standard.json'
+    config['arm_geometry'] = {'link3_pos': [.33784, .01547, 0],
+                              'link4_pos': [-.31093, .08212, 0],
+                              'joint2_zero_deg': 5.218, 'joint3_zero_deg': -5.099}
+    path = tmp_path / 'old_scene.json'
     path.write_text(json.dumps(config))
-    position, angle = worst_error(path, SDK_DH)
-    assert position < .002 and angle < .01
-    # ... and it is centimetres away from the lab arm
-    assert worst_error(path, LAB_DH)[0] > .05
-
-
-def test_long_arm_meshes_reach_the_next_joint(tmp_path):
-    """Stretched upper arm and forearm meshes still span joint to joint (their extent grows with the link)."""
-    standard, lab = json.loads(LAB.read_text()), json.loads(LAB.read_text())
-    standard.pop('arm_geometry')
-    sizes = []
-    for config in (standard, lab):
-        path = tmp_path / f'arm_{len(sizes)}.json'
-        path.write_text(json.dumps(config))
-        model = mujoco.MjModel.from_xml_string(build_scene(ROBOT, path))
-        sizes.append([max(model.geom_rbound[g] for g in range(model.ngeom) if model.geom_bodyid[g] == model.body(name).id)
-                      for name in ('link2', 'link3')])
-    upper, fore = (lab_size/standard_size for lab_size, standard_size in zip(sizes[1], sizes[0]))
-    assert upper == pytest.approx(338.2/285.0, rel=.08) and fore == pytest.approx(321.6/251.7, rel=.08)
+    with pytest.raises(ValueError, match='remove arm_geometry'):
+        build_scene(ROBOT, path)

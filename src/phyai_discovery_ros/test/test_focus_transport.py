@@ -77,7 +77,9 @@ def test_shared_survey_focus_confirm_with_robot_adapter(tmp_path,monkeypatch,unr
         while time.monotonic()<deadline and discovery.search.result is None:executor.spin_once(timeout_sec=.02)
         assert discovery.search.result is not None
         if unreachable_first:
-            assert plans==['hypothesis_1','hypothesis_2','hypothesis_2']
+            # Moving to hypothesis_2 permits one fresh reachability attempt
+            # for hypothesis_1; this adapter still reports it truly blocked.
+            assert plans==['hypothesis_1','hypothesis_2','hypothesis_2','hypothesis_1']
             assert len(discovery.workspace.tracks)==1
             assert len(discovery.workspace.snapshot()['hypotheses'])==1
             assert discovery.search.result['status']=='partial'

@@ -1,5 +1,6 @@
 """Robot-independent candidate inspection policy and stable view requests."""
 from copy import deepcopy
+import math
 import uuid
 
 
@@ -17,8 +18,10 @@ class CandidateFocus:
         self.unavailable = {}
         self.current = None
         self.key = None
+        self.last_wrist_position = None
 
-    def request(self, *, session_id, generation, viewpoint, frame, phase, targets, criteria):
+    def request(self, *, session_id, generation, viewpoint, frame, phase, targets, criteria,
+                prefer_shared_views=False):
         key = (session_id, generation, viewpoint)
         if self.current is not None and self.key == key:
             return self.current
@@ -27,9 +30,21 @@ class CandidateFocus:
             eligible = [t for t in targets if t['candidate_id'] not in self.unavailable
                 and (len(self.views.get(t['candidate_id'], set())) < self.max_views
                      or viewpoint in self.views.get(t['candidate_id'], set()))]
-            focus = next((t for t in eligible if t['candidate_id'] == self.candidate), None)
-            if focus is None and eligible:
-                focus = min(eligible, key=lambda t: (-t['priority'], t['candidate_id']))
+            # Give every proposal an initial pair of views before spending
+            # recovery views on difficult objects. Otherwise early false
+            # positives can consume the entire shared inspection sequence.
+            initial_views=min(self.max_views,max(1,int(criteria.get('min_wrist_views',2))))
+            count=lambda t:len(self.views.get(t['candidate_id'],set()))
+            first_pass=[t for t in eligible if count(t)<initial_views]
+            pool=first_pass or eligible
+            focus = next((t for t in pool if t['candidate_id'] == self.candidate
+                          and count(t)<initial_views), None)
+            if focus is None and pool:
+                def order(t):
+                    travel = (math.dist(self.last_wrist_position[:2],t['position'][:2])
+                              if prefer_shared_views and self.last_wrist_position is not None else 0.)
+                    return count(t)//initial_views,-t['priority'],count(t),travel,t['candidate_id']
+                focus = min(pool, key=order)
             if focus is None:
                 self.current = None
                 self.key = None
@@ -42,6 +57,8 @@ class CandidateFocus:
             'camera': 'wrist', 'frame': frame, 'phase': phase,
             'focus': deepcopy(focus), 'criteria': deepcopy(criteria),
         }
+        if prefer_shared_views and focus is not None:
+            self.current['companions'] = deepcopy([t for t in targets if t['candidate_id'] != focus['candidate_id']])
         return self.current
 
     def started(self):
@@ -58,6 +75,10 @@ class CandidateFocus:
     def retire(self):
         self.current = None
         self.key = None
+
+    def moved(self):
+        """A no-plan result applies to the old pose, not the whole run."""
+        self.unavailable.clear()
 
     def snapshot(self):
         return {'candidate_id': self.candidate, 'max_views_per_candidate': self.max_views,

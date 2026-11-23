@@ -62,3 +62,34 @@ def test_sync_cli_rejects_stale_scene_before_writing_config(tmp_path):
     assert result.returncode!=0
     assert 'Saved scene and survey differ' in result.stderr
     assert not output.exists()
+
+
+@pytest.mark.parametrize('rounded_limit', [False, True])
+def test_saved_piper_l_survey_passes_launcher_validation_at_exact_limits(tmp_path, rounded_limit):
+    mujoco = pytest.importorskip('mujoco')
+    robot = Path('/opt/mujoco_menagerie/agilex_piper/piper.xml')
+    if not robot.exists():
+        pytest.skip('Built PiPER-L assets required')
+    _, survey = inputs()
+    label = survey['viewpoints'][0]
+    if rounded_limit:
+        # Rounding 2.6179938 to 2.618 must not silently send an out-of-range command.
+        model = mujoco.MjModel.from_xml_path(str(robot))
+        survey['sim_scan']['targets'][label][0] = float(model.joint('joint1').range[1]) + 6.2e-6
+    path = tmp_path/'survey.json'
+    path.write_text(json.dumps(survey))
+    output = tmp_path/'input.json'
+    result = subprocess.run([sys.executable, str(ROOT/'src/phyai_discovery_ros/phyai_discovery_ros/sim_config.py'),
+        '--template', str(ROOT/'src/phyai_discovery_ros/config/mujoco_interface.json'),
+        '--survey', str(path), '--scene', str(ROOT/'sim/piper_mujoco_sim/config/lab_scene.json'),
+        '--robot', str(robot), '--output', str(output)], text=True, capture_output=True)
+    if rounded_limit:
+        assert result.returncode != 0
+        assert f'{label}, joint1=' in result.stderr
+        assert 'plan_survey.py --write' in result.stderr
+        assert not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        config = json.loads(output.read_text())
+        assert config['viewpoints'] == survey['viewpoints']
+        assert len(config['scan']['targets']) == len(survey['viewpoints'])

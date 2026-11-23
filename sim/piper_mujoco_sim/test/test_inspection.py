@@ -1,5 +1,6 @@
 """Targeted views use measured positions and fixed geometry, never block truth."""
 import json
+import os
 from pathlib import Path
 
 import mujoco
@@ -10,7 +11,7 @@ from piper_mujoco_sim.inspection import InspectionPlanner, scan_geometry
 from piper_mujoco_sim.scene import build_scene
 
 ROOT = Path(__file__).resolve().parents[3]
-ROBOT = Path('/opt/mujoco_menagerie/agilex_piper/piper.xml')
+ROBOT = Path(os.environ.get('PIPER_TEST_ROBOT', '/opt/mujoco_menagerie/agilex_piper/piper.xml'))
 pytestmark = pytest.mark.skipif(not ROBOT.exists(), reason='Menagerie model is required')
 
 
@@ -46,6 +47,56 @@ def test_focus_fits_image_and_joint_pose_is_novel_without_camera_edit(planner):
     angle = np.arccos(np.clip(r[:,2]@next_r[:,2],-1,1))
     assert np.linalg.norm(next_p-p)>.035 or angle>np.deg2rad(10)
     assert scan_geometry(planner.model)==geometry
+
+
+def test_inspection_rejects_large_wrist_flip_without_wrapping_angles(planner):
+    current=[0.,1.57,-1.3485,0.,0.,0.,0.]
+    plan=planner.choose([target()],current,'seed')
+    assert plan is not None
+    q=plan['joints'];eye,axes=planner.pose(q)
+    planner.pool=np.array([q]);planner.positions=np.array([eye]);planner.rotations=np.array([axes])
+    planner.reset()
+    current=list(q);current[5]+=np.deg2rad(90)
+    planner.motion_preferences={'max_wrist_joint_change':np.deg2rad(60)}
+    assert planner.choose([target()],current,'reject_flip') is None
+    assert planner.last_rejections['reorientation']==1
+    # With the motion limit disabled the identical visible target is feasible.
+    planner.motion_preferences={}
+    assert planner.choose([target()],current,'unrestricted') is not None
+
+
+def test_reposition_splits_rejected_wrist_flip_into_checked_gentle_legs(planner):
+    current=[0.,1.57,-1.3485,0.,0.,0.,0.]
+    plan=planner.choose([target()],current,'seed')
+    q=plan['joints'];eye,axes=planner.pose(q)
+    planner.pool=np.array([q]);planner.positions=np.array([eye]);planner.rotations=np.array([axes])
+    planner.reset();planner.allow_reposition=True
+    planner.motion_preferences={'max_wrist_joint_change':np.deg2rad(60),'max_camera_rotation':np.deg2rad(60)}
+    current=list(q);current[5]+=np.deg2rad(90)
+    result=planner.choose([target()],current,'reposition')
+    assert result is not None and len(result['waypoints'])>=2
+    previous=current;_,rotation=planner.pose(previous)
+    for waypoint in result['waypoints']:
+        assert np.max(np.abs(np.asarray(waypoint[3:6])-previous[3:6]))<=np.deg2rad(60)
+        _,next_rotation=planner.pose(waypoint)
+        assert np.arccos(np.clip((np.trace(rotation.T@next_rotation)-1)/2,-1,1))<=np.deg2rad(60)
+        assert planner._clear_path(previous,waypoint)
+        previous=waypoint;rotation=next_rotation
+    np.testing.assert_allclose(previous,result['joints'])
+
+
+def test_inspection_defers_a_view_exceeding_the_signed_joint_travel_budget(planner):
+    current=[0.,1.57,-1.3485,0.,0.,0.,0.]
+    plan=planner.choose([target()],current,'seed')
+    q=plan['joints'];eye,axes=planner.pose(q)
+    planner.pool=np.array([q]);planner.positions=np.array([eye]);planner.rotations=np.array([axes])
+    planner.reset();planner.allow_reposition=True
+    planner.motion_preferences={'max_reposition_joint_change':np.deg2rad(60)}
+    distant=list(q);distant[5]+=np.deg2rad(90)
+    assert planner.choose([target()],distant,'close') is None
+    assert 'reposition travel limit' in planner.last_failure
+    assert not planner.history
+    assert planner.choose([target()],q,'close') is not None
 
 
 def test_simulator_object_truth_cannot_change_selected_view(planner):
@@ -141,6 +192,22 @@ def test_near_post_rgb_view_clears_the_projected_robot_mask(planner):
     item = target(float(post[0] - .16), float(post[1]))
     opened = InspectionPlanner(planner.model,
         list(config['sim_scan']['targets'].values()), None, gripper=.035)
+    # Choose an explicit ray-visible, mask-occluded witness. The highest-score
+    # unconstrained view need not be occluded when view ranking changes.
+    pool,positions,rotations=opened.pool,opened.positions,opened.rotations
+    witness=None
+    f=240/(2*np.tan(np.deg2rad(float(opened.model.camera('wrist').fovy[0]))/2))
+    local=np.einsum('ni,nij->nj',np.asarray(item['position'])-positions,rotations)
+    depth=-local[:,2]
+    framed=(depth>.15)&(depth<1.15)&(np.abs(local[:,0])+.045<depth*160/f)&(np.abs(local[:,1])+.045<depth*120/f)
+    for index in np.flatnonzero(framed):
+        q=pool[index].tolist()
+        if (opened._visible(q,item['position'],.045)
+                and not opened._outside_robot_mask(q,item['position'],.045)
+                and opened._clear_path(current,q)):
+            witness=index;break
+    assert witness is not None
+    opened.pool=pool[[witness]];opened.positions=positions[[witness]];opened.rotations=rotations[[witness]]
     ray_only = opened.choose([item], current, 'ray_only')
     assert ray_only is not None
     assert opened._visible(ray_only['joints'], item['position'], .045)
@@ -148,6 +215,9 @@ def test_near_post_rgb_view_clears_the_projected_robot_mask(planner):
     assert not opened._outside_robot_mask(ray_only['joints'], item['position'], .045)
     opened.reset()
     opened.rgb_mask_clearance = True
+    assert opened.choose([item],current,'masked_witness') is None
+    assert opened.last_rejections['occluded']>0
+    opened.pool,opened.positions,opened.rotations=pool,positions,rotations
     usable = opened.choose([item], current, 'rgb_clear')
     assert usable is not None
     assert opened._outside_robot_mask(usable['joints'], item['position'], .045)

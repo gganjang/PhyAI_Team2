@@ -1,9 +1,11 @@
 """Incremental static-scene inventory and discovery coverage, not a collision map."""
 from dataclasses import asdict
+from copy import deepcopy
 import math
 import uuid
 
 import numpy as np
+from .geometry import inside_polygon,footprint_inside,outside_excluded_regions
 
 
 def pose_difference(a, b):
@@ -38,7 +40,8 @@ def fuse_pose(evidence):
 
 class Workspace:
     def __init__(self, frame='base_link', cell_size=.02, scope=None,
-                 match_distance=.025, dimension_tolerance=.02, min_cell_points=3):
+                 match_distance=.025, dimension_tolerance=.02, min_cell_points=3,
+                 table_polygon=None,table_plates=None,excluded_regions=None):
         if not frame or not np.isfinite([cell_size, match_distance, dimension_tolerance]).all() or min(
                 cell_size, match_distance, dimension_tolerance) <= 0:
             raise ValueError('Invalid workspace configuration.')
@@ -48,6 +51,10 @@ class Workspace:
         self.frame, self.cell_size, self.scope = frame, cell_size, scope
         self.match_distance, self.dimension_tolerance = match_distance, dimension_tolerance
         self.min_cell_points = min_cell_points
+        self.table_polygon=table_polygon
+        self.table_plates=table_plates or []
+        self.excluded_regions=excluded_regions or []
+        outside_excluded_regions(np.empty((0,2)),self.excluded_regions)
         self.reset()
 
     def reset(self):
@@ -55,6 +62,8 @@ class Workspace:
         self.revision = 0
         self.table = None
         self.hypotheses = []
+        self.rejected_hypotheses=[]
+        self.unverified_hypotheses=[]
         self.coverage = {}
         self.calibrations = {}
         self.last_stamps = {}
@@ -68,7 +77,7 @@ class Workspace:
         cells, counts = np.unique(np.floor(points[:, :2]/self.cell_size).astype(int), axis=0, return_counts=True)
         return [tuple(int(v) for v in cell) for cell, count in zip(cells, counts) if count >= self.min_cell_points]
 
-    def merge(self, detection):
+    def merge(self, detection, *, allow_new=True):
         if detection.frame != self.frame:
             raise ValueError('Observation and map frames differ.')
         camera = detection.camera
@@ -80,8 +89,16 @@ class Workspace:
         if detection.plane is not None and self.table is not None:
             a, b = np.asarray(self.table['normal']), np.asarray(detection.plane['normal'])
             sample = detection.surface_points.mean(axis=0)
-            if a @ b < math.cos(math.radians(3)) or abs(a @ sample+self.table['offset']) > .01:
-                raise ValueError('Table geometry conflicts with this scan; restart or inspect calibration.')
+            alignment = float(a @ b)
+            separation = abs(float(a @ sample+self.table['offset']))
+            if alignment < math.cos(math.radians(3)) or separation > .01:
+                angle = math.degrees(math.acos(float(np.clip(alignment, -1., 1.))))
+                raise ValueError(
+                    'Table geometry conflicts with this scan: '
+                    f'camera={camera}, viewpoint={detection.viewpoint}, frame={self.frame}, '
+                    f'normal difference={angle:.2f} deg (limit 3 deg), '
+                    f'surface distance={separation*1000:.1f} mm (limit 10 mm). '
+                    'Inspect camera calibration, capture-time TF, and table-plane selection before restarting.')
         self.calibrations[camera] = detection.calibration_revision
         self.last_stamps[camera] = detection.stamp
         self.warnings = list(dict.fromkeys(self.warnings + detection.warnings))
@@ -90,7 +107,8 @@ class Workspace:
             # RGB pose evidence can associate objects without a measured plane.
             # It contributes no table geometry or explored-surface coverage.
             if detection.candidates:
-                self._associate(detection)
+                self._associate(detection,allow_new=allow_new)
+            self.inspect_evidence(detection.inspection_evidence)
             return
         if self.table is None:
             self.table = dict(detection.plane)
@@ -122,15 +140,46 @@ class Workspace:
             for cell in self._cells(points):
                 self.coverage[cell] = {'state': state, 'last_observed': detection.stamp,
                                        'camera': camera, 'explored': explored, 'unexplained': unexplained}
-        self._associate(detection)
+        self._associate(detection,allow_new=allow_new)
+        self.inspect_evidence(detection.inspection_evidence)
+
+    def inspect_evidence(self,evidence):
+        if not evidence or evidence.get('verdict')!='non_block_shape':return
+        track=next((h for h in self.hypotheses if h['hypothesis_id']==evidence['candidate_id']),None)
+        if track is None or track['id'] is not None:return
+        views=track.setdefault('negative_inspection_views',[])
+        for old in views:
+            distance=np.linalg.norm(np.asarray(old['camera_position'])-evidence['camera_position'])
+            angle=math.acos(float(np.clip(np.dot(old['camera_axis'],evidence['camera_axis']),-1.,1.)))
+            if distance<=.035 and angle<=math.radians(10):return
+        views.append(dict(evidence))
+        if len(views)>=2:
+            self.hypotheses.remove(track)
+            self.rejected_hypotheses.append({**track,'identity_state':'rejected',
+                'rejection_reason':'Two independent visible close views show non-block geometry.'})
 
     @property
     def tracks(self):
         """Only evidence-confirmed inventory is exposed to the stacking layer."""
         return [track for track in self.hypotheses if track['id'] is not None]
 
-    def _associate(self, detection):
-        candidates = detection.candidates
+    def retire_unverified(self, candidate_id, reason):
+        """Remove an exhausted proposal from active work, without disproving it."""
+        track = next((h for h in self.hypotheses
+                      if h['hypothesis_id'] == candidate_id and h['id'] is None), None)
+        if track is None:
+            return False
+        self.hypotheses.remove(track)
+        self.unverified_hypotheses.append({**track, 'identity_state': 'unverified',
+            'retirement_reason': reason})
+        self.revision += 1
+        return True
+
+    def _associate(self, detection, *, allow_new=True):
+        candidates = [candidate for candidate in detection.candidates
+            if footprint_inside(candidate.position,candidate.size,candidate.quaternion,
+                                scope=self.scope,polygon=self.table_polygon)
+            and outside_excluded_regions(candidate.position[:2],self.excluded_regions)]
         matches = []
         # Use conservative geometry gates for association before deciding whether
         # an observation is precise enough to update a pose.
@@ -177,11 +226,39 @@ class Workspace:
                 track = self.hypotheses[index]
                 if candidate.resolved:
                     evidence = track.get('pose_evidence', [])
+                    protected=track.get('last_consistent_pose')
+                    if protected and not evidence:
+                        evidence=deepcopy(protected['pose_evidence'])
                     current = pose_evidence(candidate, detection)
                     differences = [(old, *pose_difference(current, old)) for old in evidence]
                     conflicts = [old for old, distance, angle in differences
                                  if distance > current['position_m']+old['position_m']
                                  or angle > current['yaw_rad']+old['yaw_rad']]
+                    novel=not any((old['camera'],old['viewpoint'])==view for old in evidence)
+                    if protected and (conflicts or (track.get('pose_conflict') and not novel)):
+                        # One disagreeing view cannot erase an established
+                        # multi-view pose. Keep its coordinates, flag the
+                        # conflict, and require a new independent check.
+                        for key in ('position','quaternion','size','pose_evidence',
+                                    'supporting_views','pose_last_observed'):
+                            track[key]=deepcopy(protected[key])
+                        track['resolved']=False
+                        track['quality']='uncertain'
+                        track['pose_conflict']=True
+                        if conflicts:
+                            track['alternatives']=(track['alternatives']+[current])[-4:]
+                            distance,angle=pose_difference(protected,current)
+                            track['pose_uncertainty']={
+                                'position_m':max(track['pose_uncertainty']['position_m'],
+                                                 protected['pose_uncertainty']['position_m'],distance+current['position_m']),
+                                'yaw_rad':max(track['pose_uncertainty']['yaw_rad'],
+                                             protected['pose_uncertainty']['yaw_rad'],angle+current['yaw_rad'])}
+                        track['reasons']=list(dict.fromkeys(track['reasons']+[
+                            'Conflicting observation; retaining last consistent multi-view pose pending verification']))
+                        track['source_cameras']=sorted(set(track['source_cameras']+[detection.camera]))
+                        track['last_observed']=detection.stamp
+                        track['observations']+=1
+                        continue
                     if conflicts:
                         track['alternatives'] = (track['alternatives']+conflicts)[-4:]
                         track['pose_conflict'] = True
@@ -212,14 +289,21 @@ class Workspace:
                         values['pose_uncertainty']['yaw_rad'] = max(
                             angle+old['yaw_rad'] for old, _, angle in residuals)
                 # Partial evidence does not replace an already fitted full pose.
-                if candidate.resolved or not track['resolved']:
+                if candidate.resolved or (not track['resolved'] and not track.get('last_consistent_pose')):
                     track.update(values)
                     if candidate.resolved:
                         track['pose_last_observed'] = detection.stamp
+                if (candidate.resolved and track['resolved'] and not track.get('pose_conflict')
+                        and len(track.get('pose_evidence',[]))>=2):
+                    track['last_consistent_pose']=deepcopy({key:track[key] for key in (
+                        'position','quaternion','size','pose_uncertainty','pose_evidence',
+                        'supporting_views','pose_last_observed')})
                 track['source_cameras'] = sorted(set(track['source_cameras'] + [detection.camera]))
                 track['last_observed'] = detection.stamp
                 track['observations'] += 1
             else:
+                if not allow_new:
+                    continue  # Close inspection refines known objects; survey owns new IDs.
                 # Do not mint an identity for an overlapping hypothesis rejected
                 # by the precise association gate (e.g. a partial-face centre).
                 nearby = [track for track in self.hypotheses if
@@ -276,6 +360,23 @@ class Workspace:
             scope_cells = [entry for entry in entries if
                 xmin <= (entry['index'][0]+.5)*self.cell_size < xmax and
                 ymin <= (entry['index'][1]+.5)*self.cell_size < ymax]
+        if self.table_polygon is not None:
+            keep=inside_polygon((np.asarray([e['index'] for e in scope_cells]).reshape(-1,2)+.5)*self.cell_size,self.table_polygon)
+            scope_cells=[entry for entry,valid in zip(scope_cells,keep) if valid]
+            entries=scope_cells
+        centres=(np.asarray([e['index'] for e in scope_cells]).reshape(-1,2)+.5)*self.cell_size
+        keep=outside_excluded_regions(centres,self.excluded_regions)
+        scope_cells=[entry for entry,valid in zip(scope_cells,keep) if valid]
+        centres=centres[keep]
+        if self.excluded_regions:entries=scope_cells
+        plates=[]
+        for plate in self.table_plates:
+            keep=inside_polygon(centres,plate['polygon'])
+            own=[entry for entry,valid in zip(scope_cells,keep) if valid]
+            count=len(own)
+            plates.append({'id':plate['id'],'cells':count,
+                'explored_fraction':sum(e['state']=='observed' or (e['state']=='uncertain' and e.get('explored',True)) for e in own)/count if count else 0.,
+                'observed_fraction':sum(e['state']=='observed' for e in own)/count if count else 0.})
         observed = sum(entry['state'] == 'observed' for entry in scope_cells)
         uncertain = sum(entry['state'] == 'uncertain' and entry.get('explored', True) for entry in scope_cells)
         unexplained = sum(entry.get('unexplained', False) for entry in scope_cells)
@@ -289,8 +390,13 @@ class Workspace:
                             'age': max(0., now-track['last_observed'])} for track in self.tracks],
                 'hypotheses': [{**track, 'age': max(0., now-track['last_observed'])}
                                for track in self.hypotheses if track['id'] is None],
+                'rejected_hypotheses':list(self.rejected_hypotheses),
+                'unverified_hypotheses':[{**track,'age':max(0.,now-track['last_observed'])}
+                                         for track in self.unverified_hypotheses],
                 'coverage': {'cell_size': self.cell_size, 'scope': self.scope,
                              'observed_fraction': fraction, 'explored_fraction': explored,
-                             'unobserved_fraction': 1.-explored, 'unexplained_cells': unexplained, 'cells': entries},
+                             'unobserved_fraction': 1.-explored, 'unexplained_cells': unexplained, 'cells': entries,
+                             'plates':plates,'table_polygon':self.table_polygon,
+                             'excluded_regions':self.excluded_regions},
                 'calibrations': dict(self.calibrations), 'warnings': list(self.warnings),
                 'motion_authorization': False}

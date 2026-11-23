@@ -91,6 +91,7 @@ class Detection:
     candidates: list
     warnings: list
     unexplained_points: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
+    inspection_evidence: object = None
 
 
 def backproject(capture, config):

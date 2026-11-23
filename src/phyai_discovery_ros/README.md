@@ -1,18 +1,18 @@
 # Teammate quick-start: RGB discovery and viewer
 
-Build the shared packages; Junh, MuJoCo and the retired stacking/monitoring apps
-are not required:
+Build the shared packages. The default hardware configuration uses the shared
+MuJoCo geometry planner; no simulator process or Junh app is launched:
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-up-to phyai_discovery_ros
+colcon build --symlink-install --packages-up-to phyai_discovery_ros piper_mujoco_sim
 source install/setup.bash
-# Run from the repository root to provision/load SAM2 automatically:
+# Run from the repository root to provision/load the selected model automatically:
 bash scripts/run_discovery.sh
 ```
 
 `run_discovery.sh` sources ROS and the workspace automatically. Missing discovery
-packages are built before SAM2 setup; `--build` forces a rebuild after pulling.
+packages are built before model setup; `--build` forces a rebuild after pulling.
 Use `PHYAI_WS` to select an existing workspace. Checkouts outside a colcon `src/`
 directory use `.discovery-ros/` under the repository.
 
@@ -20,16 +20,235 @@ directory use `.discovery-ros/` under the repository.
 `src/phyai_discovery_ros/config/discovery.json`; no separate JSON file is required.
 Installation settings are configured once in that default. Pass
 `--config /path/other.json` only to select an alternative, such as an installation
-copy of `discovery_rgb.json` for the RGB backend.
-The current default has no scan targets: enabling `auto_scan:=true` currently
-requires a config with `scan.targets` and `scan.joint_limits`.
+copy of `discovery_rgb.json` for candidate-focus integration.
+The script enables automatic scanning by default, which requires a config with
+`scan.targets` and `scan.joint_limits`. The included default uses RGB/SAM 3.1 with
+color CameraInfo, a generated coverage survey followed by candidate-directed
+inspection, and an open gripper. It has no depth subscriptions. Pass `-- auto_scan:=false`
+for observation without motion.
+
+Discovery has no configured expected object count. Survey masks create provisional
+hypotheses; close views must supply the geometry and identity evidence needed for
+confirmation or rejection. User-reported counts belong only to the evaluation
+context of that particular session. A per-object inspection limit or shared view
+budget bounds work; it does not specify how many objects the scene should contain.
+An exhausted budget with unresolved hypotheses produces a partial result.
+
+The hardware map uses `map_frame: tabletop`. Its XY origin is the junction of
+all four table plates; Z=0 is the tabletop. Axes remain parallel to `base_link`
+and distances are metres. The saved installation places that junction at
+`[0.0755, -0.0655, 0]` in `base_link`, so a measured block converts as
+`x_table = x_base - 0.0755`, `y_table = y_base + 0.0655`.
+The arm post is therefore at `[-0.0755, 0.0655]` in the tabletop map.
+The four 84 × 50 cm plates span `[-0.8405, 0.8405, -0.5005, 0.5005]`.
+`coordinate_system` records the source TF frame and measured origin. Camera
+captures are translated into this map; inspection targets and robot-mask
+projection convert back to the arm frame. No additional host TF is required.
+RGB reconstruction still depends on camera extrinsic calibration.
+
+Overhead and wrist survey images propose candidate locations; they do not
+confirm identities. The robot then visits each candidate for focused wrist
+images. Two consistent close-up geometry measurements must verify the block's
+shape and pose, with default bounds of 10 mm position and 15° yaw. The planner
+selects novel visible views, moves and settles the arm, then requests a saved
+image. A clipped or occluded silhouette requests another view rather than
+counting as confirmation or evidence that the object is absent.
+Candidates whose inspection budget expires remain visible and selectable as
+unverified objects in the map and remain included in candidate totals. They
+are excluded from the confirmed inventory and keep the result partial.
+
+The default saves host URDF joint frames/limits, calibrated camera mounts and
+color intrinsics in `view_planner.installation`. The hardware camera is attached
+to `link6` and joint6 remains available to the planner. The broad survey uses
+one raised cobra posture: joints 2–6 stay fixed while joint1 rotates. The camera
+looks 5° farther downward than the original cobra posture. Joint3
+is -1.0127335374 rad, with joint5 retaining the host limit of 1.22 rad. Far-edge
+visibility is reduced by this tilt; saved coverage gaps remain explicit.
+The initial approach first raises at the measured base angle, settles, and then rotates toward the first view. The raise does not
+request a discovery image.
+
+`view_planner.survey_motion` selects `compact_rotation` with a single posture
+in `posture_grid`. Selected angles are visited in one direction, with inserted
+stops limiting successive base changes to 20°. Survey motion is capped at
+0.25 rad/s (about 14°/s) and 0.5 rad/s². The host-constrained base range remains
+±150°, inside `scan.cable_yaw_limit: 3.141592653589793` (±180°). Trajectories use
+signed joint angles with no modulo wrapping or continuous revolutions. Feedback
+outside the cable range halts scanning instead of selecting a wrapped angle.
+The same base joint limits constrain near-post and close-up inspection planning.
+
+The full tabletop is displayed continuously, including the table center and
+arm-post region. The default has no circular search exclusion
+(`excluded_regions: []`, `near_post_survey.exclude_from_search: false`).
+Unobserved areas remain visible as unobserved coverage rather than cut-out holes.
+Historical exclusions also do not cut holes in the physical tabletop drawing.
+
+The optional near-post survey is disabled by default after physical shaking
+was observed at its first transition. Its model checks and slow trajectory
+profile did not establish acceptable real-arm behavior. Disabling it does not
+remove any part of the tabletop map or coverage scope.
+
+The current `discovery_mode: full` runs 11 Cobra stops and four outer-table
+coverage views before candidate inspection. Isaac uses the same nominal joint
+targets. Both can skip interior Cobra stops when usable overhead evidence covers
+their view, and can use one close image to measure multiple candidates. The
+near-post list is empty. Set `survey_only` to stop for review after the survey.
+Candidate inspection has 32 slots and four attempts per candidate. Two close-up
+measurements remain required to confirm a block.
+Unobserved areas, including the post region, remain explicitly unobserved.
+
+Round or undersized instance masks cannot become elongated-block hypotheses
+solely because their pixel area resembles a block. Simulator blocks are removed
+from the hardware model.
+
+`detector.min_table_fraction: 0.99` requires at least 99% of a raw SAM2 region's
+pixels to lie within the projected tabletop on both the support and block-top
+planes. Edge-crossing regions are rejected rather than clipped into apparent
+blocks. The entire estimated cuboid footprint must also fit the calibrated table
+polygon/scope before association and again before inspection planning. Raw masks
+remain available in diagnostics with `outside_tabletop` or
+`outside_table_footprint` decisions; they do not become inspection targets.
+
+`scan.motion_profiles` sets timing for each phase. On hardware the Cobra sweep
+uses cubic interpolation with 0.25 rad/s speed, 0.5 rad/s² acceleration and
+0.25 s settling. Coverage and inspection moves use a seventh-order trajectory
+with zero velocity, acceleration and jerk at both ends; duration is calculated
+to bound peak speed at 0.15 rad/s, acceleration at 0.15 rad/s² and jerk at
+0.3 rad/s³. Inspection moves take at least 3 seconds and settle for 1 second.
+The planner strongly penalises joint travel and camera rotation. It first seeks
+a view within 60° of the current camera orientation and wrist joints. If that
+is unavailable, `inspection_reposition: true` permits a larger overall change
+through collision-checked intermediate legs, each within the same 60° bounds.
+Every leg uses the slow inspection profile and settles before the next leg;
+only the final view requests a verification image. Signed joint paths preserve
+the existing cable and command limits. A blocked path retains uncertainty.
+An unreachable response is tied to the current robot pose. Once another close
+inspection is captured, those candidates are eligible again. A run can still
+stop with a partial result when all remaining views are blocked or the view
+budget is exhausted; `search_finished` means the run stopped, not that every
+hypothesis was confirmed. The snapshot retains the stop reason, unmet checks,
+and remaining hypotheses.
+`/discovery/scan_status` includes `inspection_trajectory`: start and target
+joints, the current leg target, remaining route, profile, duration and command limits. These bounds describe the
+commanded trajectory; physical vibration still requires live validation.
+
+The physical camera clocks were measured about 20–30 ms ahead of the discovery
+process. The hardware config allows `input_max_future_skew: 0.05` seconds while
+retaining `input_max_age: 1.0` and the capture-request timestamp check. Other
+configs default to zero future tolerance. Capture-time TF is still required;
+pending RGB captures keep their original pixels while waiting for it. This avoids
+repeated capture timeouts caused by small clock differences or mismatched retry
+frames. Error messages include measured image age for diagnosis.
+
+The 2026-11-13 live check confirmed that host PiPER-L URDF forward kinematics
+matches link6 TF. Measured joint2 and joint3 were slightly outside the declared
+URDF ranges; reconcile feedback zero offsets and limits before automatic motion.
+Start with `-- auto_scan:=false` to verify live observations without arm commands.
+
+At normal move and waypoint boundaries, the next trajectory begins at the
+last commanded pose. Feedback still verifies arrival, but it no longer replaces
+the command with a tolerance-sized position step. Excessive feedback drift
+between views or a view-request change before measured arrival halts the scan.
+Fault stopping retains the measured-position hold contract.
+
+The controller approaches the first sweep pose from measured joints using
+the configured speed and acceleration bounds. The host bridge owns execution
+safeguards; an approximate-model collision veto does not block startup from the
+folded posture. Survey generation and candidate inspection retain their model
+collision checks. Feedback freshness, command ownership, joint limits, measured
+arrival and settling checks also remain active.
+
+Hardware model conversion supports PiPER-L's fixed flange/gripper hierarchy and
+full inertia tensors. It adopts the saved host joint frames and limits while
+preserving physical mesh and inertia placement at the reference zero pose.
+The saved host frames and camera calibration still need to match the live robot;
+changing the simulator model does not update the host URDF or TF automatically.
+
+The default `discovery.json` now uses the host's conservative command limits,
+including joint5 at ±1.22 rad (about 70°). A live `near_post_1` attempt stopped
+at 1.2223 rad when asked for 1.3638 rad, indicating an effective clamp below
+the full PiPER-L model range. The saved survey uses poses regenerated under
+the conservative limits, and the focused inspection planner uses those same
+limits. Arrival tolerances remain unchanged. The external safety bridge does
+not expose its limits through ROS parameters.
+
+`discovery_host_legacy_limits.json` is also updated with the same constrained
+survey, tabletop coordinates, and close-up verification settings.
+
+```bash
+ROS_DOMAIN_ID=10 bash scripts/run_discovery.sh --build -- viewer_port:=24518
+```
+
+The fixed-posture broad survey is regenerated under these command limits. Inspect `survey_stages` for the saved view counts
+and `survey_coverage` for predicted coverage and remaining blind samples.
+
+The planner needs the `mujoco` Python package, `piper_mujoco_sim`, the robot assets
+at `view_planner.robot_path`, and the measured scene at `scene_config`. The
+launcher includes the geometry package in its build when that backend is selected.
+Camera, scene and joint-frame edits invalidate the saved survey signature.
+Regenerate offline after updating installation geometry:
+
+```bash
+python3 -m phyai_discovery_ros.hardware_config \
+  --config src/phyai_discovery_ros/config/discovery.json --write
+```
+
+Generation samples empty table geometry, checks connecting paths (using the
+reference pose as a transit when required), and requires 95% sampled coarse-location
+coverage on each plate before writing by default. `--allow-partial` saves the best
+valid survey with explicit remaining blind samples; it does not mark those
+samples covered. It optimises survey order using only clear connections.
+The saved `survey_motion.max_views` budget is 32; the optional near-post pass is disabled.
+Additional intermediate broad poses bound base-angle steps without changing
+the raised posture.
+Offline generation uses `survey_sample_count`;
+online focused inspection uses the smaller `sample_count` pose pool. It publishes
+no motion commands. Model paths still
+require physical validation in the installation.
+
+The workspace viewer displays centimetres by default, with a metres toggle;
+ROS messages and saved positions remain in metres. The top-down map is rotated 90° counterclockwise to match the workstation:
++X points upward, +Y points left, and the four-plate junction remains (0,0).
+This is a display rotation; block positions, frame transforms and yaw values
+remain in the original tabletop coordinate system.
+The arm post has a separate marker. Grid ticks, block labels, cursor readout,
+selected block details and the inventory use the selected display unit. Inventory
+columns label X, Y and Z separately. Yaw is measured from +X toward +Y; these
+rectangular blocks have a 180° orientation symmetry.
+
+A pose supported by two consistent independent views is retained when a later
+measurement conflicts. Its position stays at the last consistent estimate;
+the pose becomes unresolved, the disagreeing view remains in `alternatives`,
+and the position/yaw bounds expand to include the disagreement. Incomplete
+silhouette fits cannot move this retained pose or reduce its bounds. A new
+independent view consistent with the retained evidence is required to resolve
+the conflict. Repeating an old supporting view does not suffice. The scene is
+assumed static; persistent disagreement requires investigation rather than
+silently choosing the latest position.
+
+The inventory labels these poses **Retained; recheck** and displays their
+position bounds. The bounds are conditional on the configured camera and arm
+calibration; they are not measured guarantees of absolute tabletop accuracy.
+Retaining consensus does not recalibrate camera extrinsics or the table origin.
+
+Discovery IDs follow confirmation order within a run; they do not identify
+numbers marked on physical blocks, and can differ between runs. When stacking
+order is assigned it can also change the public names. The selected-block panel
+includes the candidate ID to help trace the same observation.
 
 `run_discovery.sh` enables the viewer by default at **http://localhost:23518**
 and prints its URL. It listens on `0.0.0.0` by default, so external clients can
 open `http://<host-ip>:23518`. Pass `-- viewer_host:=127.0.0.1` to restrict access
 to this machine, `-- with_viewer:=false` to disable it, or
-`-- viewer_port:=PORT` to use another port. Automatic arm scanning remains off
-unless explicitly enabled with `auto_scan:=true`.
+`-- viewer_port:=PORT` to use another port. Pass `-- auto_scan:=false` to disable
+automatic arm scanning.
+
+If the viewer reports `Address already in use`, another listener already owns
+the configured port. Check it with `ss -ltnp 'sport = :23518'`. In a dev container,
+also check VS Code's Ports panel and the host for a forwarded port. Choose a free
+port, for example `bash scripts/run_discovery.sh -- viewer_port:=24518`, then open
+`http://localhost:24518`. The simulation launcher accepts the same override:
+`bash scripts/run_discovery_sim.sh -- viewer_port:=24518`. Discovery can also run
+without the browser viewer using `-- with_viewer:=false`.
 
 For a package-only handoff, share `src/phyai_discovery`,
 `src/phyai_discovery_interfaces`, and `src/phyai_discovery_ros`. The repository
@@ -705,12 +924,23 @@ of perception inputs. Confirm repeatability and set error budgets from those
 results before connecting the inventory to picking or stacking.
 
 Build and source the workspace first so the generated `GetBlockInfo` interface
-is available. Then run transport tests from the repository root:
+is available. Then select checks from the repository root:
 
 ```bash
-PYTHONPATH=src/phyai_discovery:src/phyai_discovery_ros \
-  python3 -m pytest -q src/phyai_discovery_ros/test
+bash scripts/test.sh sweep          # offline geometry, rotation and candidate-review stop
+bash scripts/test.sh candidates     # association, confirmation and negative evidence
+bash scripts/test.sh diagnostics    # saved masks/reports and viewer HTTP
+bash scripts/test.sh motion         # scan execution, timing and fault handling
+bash scripts/test.sh transport      # images/TF, calibration and discovery services
+bash scripts/test.sh setup          # launcher and provisioning
+bash scripts/test.sh --list
 ```
+
+Combine affected groups in one invocation; `--dry-run` previews the selection.
+The runner deduplicates overlapping files/directories and isolates ROS tests on
+domain 173 (`PHYAI_TEST_ROS_DOMAIN_ID` overrides it). No arguments run nothing;
+the complete suite requires the explicit `all` group. Perception recognition of
+real blocks versus drawings/devices still requires recorded-image evaluation.
 
 ## Shared candidate-focus configuration and adapter contract
 
@@ -727,8 +957,8 @@ inspection slots do not need fixed joint targets; only survey poses are required
 in a robot scan configuration. The same core selects candidates whether the app
 uses ROS, MuJoCo or direct Python.
 
-Discovery stays on the selected candidate until it meets the observation criteria
-or exhausts its budget. Stable hypothesis identities keep its budget intact when
+Discovery gives each candidate an initial pair of close views before allocating
+further recovery views to difficult candidates. Stable hypothesis identities keep its budget intact when
 it gains a public block ID. Each acquired focused view consumes one attempt for its selected candidate;
 retries at the same view do not manufacture independent evidence. Reset starts a
 new policy session. Unreachable/exhausted candidates remain in the partial
@@ -751,3 +981,130 @@ Use one outcome for a request. Drive `tick()` with measured stationarity and fee
 calibrated captures as before; `complete()` advances the shared policy. Read
 `view_request()` again after each observation or no-plan report. A false return
 means the report no longer applies. Snapshot reads do not select or consume views.
+
+## Accepted-image diagnostics and saved reports
+
+The hardware configuration saves each accepted RGB image, exact SAM2 masks,
+filter decisions, fit diagnostics and capture-time geometry under
+`.discovery-reports/<session>/`. `report.json` contains measured coverage for each
+table plate, confirmed inventory, unresolved hypotheses and rejected non-block
+evidence. `latest.json` identifies the latest saved session. The viewer's
+**Accepted image · SAM2 diagnostics** panel follows incoming accepted frames and
+defaults to filtered SAM2 masks without rectangles, and can show RGB, all raw
+masks, candidate boxes or an individual mask as an overlay or binary image. SAM2
+segments regions without classifying them: pencil drawings and similarly sized
+device parts can pass the geometric proposal filter. A mask is not proof of a
+physical block, and the sweep does not confirm identities. Disable
+**Follow newest** to inspect an earlier frame or download its evidence JSON.
+The viewer restores the saved history when restarted after a run.
+
+Close inspection refines survey identities without minting offset duplicates.
+Two independent, unobstructed close views showing a centered segment with
+incompatible dimensions/aspect can retire a provisional non-block. Missing or
+occluded segmentation retains uncertainty. Confirmed identities are preserved.
+
+Table polygons and plate bounds are first transformed using the measured
+scene post translation and mounting yaw, then centred at the plate junction. Saved survey validation also checks
+plate geometry: after changing `robot_yaw_degrees` or post position, regenerate
+with `python3 -m phyai_discovery_ros.hardware_config --config
+src/phyai_discovery_ros/config/discovery.json --max-views 12 --allow-partial --write` in the
+sourced workspace. Verify the physical mounting matches that scene first.
+Predicted survey coverage is separate from coverage measured in accepted images.
+
+### YOLO26n-seg segmentation
+
+The hardware default is SAM 3.1; its checkpoint requires local Hugging Face authentication.
+YOLO26n-seg remains an optional backend: set `segmentation.backend: "yolo26n-seg"`,
+`min_score: 0.25`, and `image_size: 1280` in a separate experiment config.
+The stock-checkpoint replay on 53 archived images yielded 39 masks, two provisional
+candidate observations, and no resolved observations; it is unsuitable as the
+block-discovery baseline. The YOLO launcher uses an isolated `.discovery-yolo26`
+runtime, pinned Ultralytics 8.4.202, and checksum-verified public
+`yolo26n-seg.pt` weights. ROS retains its interpreter and packages. If available,
+the existing SAM2 CUDA packages are shared read-only; YOLO dependencies use a
+separate environment with headless OpenCV.
+
+```bash
+# Select a config with segmentation.backend set to yolo26n-seg:
+ROS_DOMAIN_ID=10 bash scripts/run_discovery.sh --config /path/to/yolo-config.json -- auto_scan:=false
+# Use block-trained YOLO segmentation weights when available:
+bash scripts/run_discovery.sh --config /path/to/yolo-config.json --checkpoint /path/to/best.pt -- auto_scan:=false
+```
+
+The stock weights have the 80 COCO classes and no block class. Their masks are
+geometric proposals; a predicted label such as `kite` or `book` is retained in the
+evidence and never changed to `block`. The default confidence threshold is 0.25,
+image size 1280, with all trained classes considered (`classes: null`). Restrict
+`classes` to IDs appropriate to a custom trained checkpoint. Prediction uses RGB
+to BGR conversion and full-resolution instance masks, never filled box rectangles.
+The existing 99% tabletop-region and complete-footprint checks still apply.
+
+Accepted-image diagnostics show the backend, trained class, confidence, exact raw
+masks, filtering decisions, and geometry fits. A missing mask yields no proposals;
+there is no automatic SAM2 fallback. Review recorded images before automatic motion:
+
+```bash
+python3 scripts/evaluate_discovery_segmentation.py \
+  --config .discovery-yolo26/discovery.json \
+  --report .discovery-reports/<source-session-id> \
+  --output .discovery-reports/yolo26-stock-replay
+```
+
+This writes `evaluation.json` plus accepted-image evidence packets with exact
+masks for every source image. It runs no robot commands. The archives lack the
+capture-time robot exclusion masks; the replay reports that limitation explicitly.
+Candidate observations are per-image proposals, not unique confirmed objects.
+Check YOLO/SAM worker behavior with `bash scripts/test.sh segmentation`; model
+quality is evaluated separately by replaying real captures.
+
+### SAM 3.1 segmentation
+
+The gated SAM 3.1 backend remains available. Set `segmentation.backend: "sam3.1"`,
+`min_score: 0.7`, and `device: "cuda"` to use the
+concept prompt `small rectangular block` and minimum model confidence `0.7`.
+This score is semantic detection confidence, not SAM2's predicted mask-IoU score
+and not a calibrated probability that the object is a physical block. The existing
+99% tabletop-mask requirement and full fitted-footprint bounds remain mandatory.
+A drawing or similarly shaped device can still require geometric investigation.
+
+Request checkpoint access at <https://huggingface.co/facebook/sam3.1>, then
+authenticate locally with Hugging Face or supply a downloaded checkpoint:
+
+```bash
+bash scripts/setup_discovery_sam31.sh --checkpoint /path/to/sam3.1_multiplex.pt
+ROS_DOMAIN_ID=10 bash scripts/run_discovery.sh --checkpoint /path/to/sam3.1_multiplex.pt -- auto_scan:=false
+```
+
+The local checkpoint can live at `checkpoints/sam3.1_multiplex.pt`; this workspace's
+runtime cache links to that file, so subsequent launches do not require a download
+or Hugging Face authentication. Checkpoint files are excluded from version control.
+Setup validates model loading and a real CUDA session/inference call before
+reporting ready. Verbose model-loader diagnostics are saved to
+`.discovery-sam31/model-load.log`; live worker logs are under
+`.discovery-sam31/logs/`. The adapter handles the pinned upstream session wrapper's
+unsupported `offload_state_to_cpu=False` argument while keeping state on CUDA.
+
+The regular launcher dispatches from the selected config. SAM 3.1 uses an isolated
+Python 3.12/PyTorch 2.10 CUDA environment under `.discovery-sam31`; ROS retains its
+own interpreter. Source and checkpoint revisions are pinned in `setup_sam31.py`.
+There is no automatic fallback to SAM2 when access or model loading fails.
+Independent still captures start fresh single-frame sessions in the persistent
+3.1 predictor, preventing tracking history from carrying masks between views.
+The official loader uses JPEG frames; accepted source RGB is still archived as PNG.
+
+The viewer's accepted-image panel records the model, prompt, threshold, individual
+scores, raw masks, geometry decisions, and filtered masks. Confidence and pixel
+masks remain available in the downloadable evidence JSON.
+
+Inspected candidates that exhaust their accepted close-view budget or the shared
+inspection sequence leave the active queue
+as `unverified_hypotheses`. They retain their evidence and keep the outcome partial;
+exhaustion does not prove they are non-blocks. Two independent close views of
+incompatible geometry can still explicitly reject a provisional hypothesis.
+Confirmed identities cannot be removed by that negative-shape rule. Failed
+captures do not count as accepted inspections. `processing_timeout` gives model
+inference its own budget without extending sensor capture or motion timeouts.
+
+Run only affected checks with `bash scripts/test.sh segmentation candidates`.
+These check protocol and lifecycle behavior without downloading a model; inference
+quality must be checked on recorded images after the gated checkpoint is available.

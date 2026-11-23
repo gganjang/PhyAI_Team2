@@ -12,7 +12,8 @@ BLOCKS=[(.1,0.,.075,.025,.015,0.)]
 
 def test_inspection_targets_exclude_satisfied_blocks_and_prioritize_hypotheses():
     tracks=[{'id':'good','position':[.1,0,.01],'size':[.075,.025,.015],'resolved':True},
-            {'id':'weak','position':[.2,0,.01],'size':[.075,.025,.015],'resolved':True},
+            {'id':'weak','position':[.2,0,.01],'size':[.075,.025,.015],'resolved':True,
+             'quaternion':[.70710678,0.,0.,.70710678]},
             {'id':None,'hypothesis_id':'new','position':[.3,0,.01],
              'size':[.075,.025,.015],'resolved':False}]
     report={'blocks':[{'id':'good','meets_criteria':True},
@@ -21,6 +22,7 @@ def test_inspection_targets_exclude_satisfied_blocks_and_prioritize_hypotheses()
     assert [t['id'] for t in targets]==['weak','new']
     assert targets[1]['priority']>targets[0]['priority']
     assert targets[0]['position']==tracks[1]['position']
+    assert targets[0]['quaternion']==tracks[1]['quaternion']
 
 
 def accept(search, detector, camera, stamp, viewpoint):
@@ -53,6 +55,21 @@ def test_threshold_satisfied_stops_without_using_reserve_views():
     assert search.inspection_round==0
 
 
+def test_overhead_survey_skip_preserves_first_move_and_resets_for_new_scene():
+    workspace=Workspace(scope=(-.2,.2,-.15,.15))
+    search=Search(workspace,viewpoints=('first','covered','last'))
+    accept(search,Detector(),'overhead',1.,'overhead')
+    search.skip_covered_survey_views(['first','covered'])
+    assert search.target=='first'
+    assert search.progress()['skipped_survey_views']==['covered']
+    accept(search,Detector(),'wrist',2.,'first')
+    assert search.target=='last'
+    assert search.accepted==2 and search.rejected==0
+    search.reset()
+    assert search.viewpoints==('first','covered','last')
+    assert search.progress()['skipped_survey_views']==[]
+
+
 def test_unmet_coverage_appends_novel_views_without_resetting_blocks():
     workspace=Workspace(scope=(-.5,.5,-.5,.5))
     detector=Detector(DetectorConfig(known_block_size=(.075,.025,.015)))
@@ -75,6 +92,18 @@ def test_unmet_coverage_appends_novel_views_without_resetting_blocks():
     assert search.viewpoints==('first',)
     assert search.inspection_round==0
     assert search.assessment is None
+
+
+def test_pose_only_criteria_cannot_certify_incomplete_table_coverage():
+    workspace=Workspace(scope=(-.5,.5,-.5,.5))
+    detector=Detector(DetectorConfig(known_block_size=(.075,.025,.015)))
+    search=Search(workspace,viewpoints=('first',),
+                  criteria=SearchCriteria(require_tabletop_coverage=False))
+    accept(search,detector,'overhead',1.,'overhead')
+    accept(search,detector,'wrist',2.,'first')
+    assert search.assessment['explored_fraction'] < search.criteria.min_explored_fraction
+    assert search.result['criteria_met']
+    assert search.result['status']=='partial'
 
 
 def test_view_budget_cannot_repeat_forever():

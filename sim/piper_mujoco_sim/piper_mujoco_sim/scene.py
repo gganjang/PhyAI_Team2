@@ -1,4 +1,4 @@
-"""Compose the measured lab layout with the pinned Menagerie robot.
+"""Compose the measured lab layout with the pinned PiPER-L robot.
 
 World origin is the combined tabletop center, Z up. The mounting post and
 overhead camera use offsets from that origin. Wrist camera mount pose uses the
@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import mujoco
+import numpy as np
 
 
 def vector(values):
@@ -52,53 +53,11 @@ def scene_snapshot(model, data, config, paused=False, restart_id=0):
                    for i in range(len(config['block_positions']))]}
 
 
-def _quat_mul(a, b):
-    w1, x1, y1, z1 = a
-    w2, x2, y2, z2 = b
-    return [w1*w2 - x1*x2 - y1*y2 - z1*z2, w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2, w1*z2 + x1*y2 - y1*x2 + z1*w2]
-
-
-def _floats(text, default):
-    return [float(v) for v in text.split()] if text else list(default)
-
-
-def lengthen_arm(root, world, arm):
-    """Match the Menagerie PIPER to an arm with other upper-arm/forearm lengths (e.g. the lab PIPER: 338 / 322 mm,
-    whose firmware end pose follows that geometry). arm_geometry: link3_pos, link4_pos (child body positions, m)
-    and joint2_zero_deg, joint3_zero_deg (extra turn of link2/link3 about their joint axis, so the joint readings
-    stay the robot's own). The link meshes are stretched along the link and turned to the new link direction."""
-    meshes = {mesh.get('name') or Path(mesh.get('file')).stem: mesh for mesh in root.iter('mesh')}
-    for parent, child, zero in (('link2', 'link3', arm.get('joint2_zero_deg', 0.)),
-                                ('link3', 'link4', arm.get('joint3_zero_deg', 0.))):
-        body = world.find(f".//body[@name='{parent}']")
-        link = body.find(f"body[@name='{child}']")
-        old = _floats(link.get('pos'), [0, 0, 0])
-        new = arm[f'{child}_pos']
-        link.set('pos', vector(new))
-        half = math.radians(zero)/2
-        body.set('quat', vector(_quat_mul(_floats(body.get('quat'), [1, 0, 0, 0]), [math.cos(half), 0, 0, math.sin(half)])))
-        # Geometry of `parent` follows the link: turned from the old to the new child direction (in the turned frame)
-        # and stretched by the length ratio along the mesh x axis (the links run close to x)
-        turn = math.atan2(new[1], new[0]) - math.atan2(old[1], old[0])
-        ratio = math.hypot(new[0], new[1])/math.hypot(old[0], old[1])
-        spin = [math.cos(turn/2), 0, 0, math.sin(turn/2)]
-        c, s = math.cos(turn), math.sin(turn)
-        for geom in body.findall('geom'):
-            mesh = meshes.get(geom.get('mesh'))
-            if mesh is not None and not mesh.get('_stretched'):
-                scale = _floats(mesh.get('scale'), [1, 1, 1])
-                mesh.set('scale', vector([scale[0]*ratio, scale[1], scale[2]]))
-                mesh.set('_stretched', '1')
-            x, y, z = _floats(geom.get('pos'), [0, 0, 0])
-            geom.set('pos', vector([c*x - s*y, s*x + c*y, z]))
-            geom.set('quat', vector(_quat_mul(spin, _floats(geom.get('quat'), [1, 0, 0, 0]))))
-    for mesh in meshes.values():
-        mesh.attrib.pop('_stretched', None)
-
-
 def build_scene(robot_path, config_path):
     config = json.loads(Path(config_path).read_text())
+    if config.get('arm_geometry'):
+        raise ValueError('Legacy arm_geometry overrides are unsupported; remove arm_geometry '
+                         'from the scene config and use the official PiPER-L model.')
     root = ET.parse(robot_path).getroot()
     root.set('model', 'piper_block_stacking_lab')
     compiler = root.find('compiler')
@@ -145,9 +104,6 @@ def build_scene(robot_path, config_path):
                                   pos=vector([x + dx, y + dy, -(height + thickness) / 2]),
                                   size=vector([.02, .02, (height - thickness) / 2]),
                                   rgba='.55 .57 .6 1')
-    arm = config.get('arm_geometry')
-    if arm:
-        lengthen_arm(root, world, arm)
     radius = config['post_radius']
     base_position = [*config['post_position'], 0]
     base = world.find("body[@name='base_link']")
@@ -195,9 +151,31 @@ def build_scene(robot_path, config_path):
     # This preserves the configured placement and axes at joint6 == 0.
     arm_reference = ET.SubElement(arm_casing, 'body', name='wrist_mount_reference',
                                   pos=wrist.get('pos'), quat=wrist.get('quat'))
-    finger = wrist.find("body[@name='link7']")
+    # PiPER-L has fixed flange/gripper-base bodies between link6 and link7.
+    # Compose that zero-opening transform without inheriting wrist/finger motion.
+    def finger_pose(body, position, quaternion):
+        if body.get('name') == 'link7':
+            mount = body.find("site[@name='wrist_mount_frame']")
+            if mount is not None:
+                mount_position, mount_quaternion = np.zeros(3), np.zeros(4)
+                mujoco.mju_mulPose(mount_position, mount_quaternion, position, quaternion,
+                                  [float(v) for v in mount.get('pos', '0 0 0').split()],
+                                  [float(v) for v in mount.get('quat', '1 0 0 0').split()])
+                return mount_position, mount_quaternion
+            return position, quaternion
+        for child in body.findall('body'):
+            child_position, child_quaternion = np.zeros(3), np.zeros(4)
+            mujoco.mju_mulPose(child_position, child_quaternion, position, quaternion,
+                              [float(v) for v in child.get('pos', '0 0 0').split()],
+                              [float(v) for v in child.get('quat', '1 0 0 0').split()])
+            found = finger_pose(child, child_position, child_quaternion)
+            if found is not None:
+                return found
+        return None
+
+    position, quaternion = finger_pose(wrist, [0., 0., 0.], [1., 0., 0., 0.])
     gripper_root = ET.SubElement(arm_reference, 'body', name='gripper_root_mount',
-                                 pos=finger.get('pos'), quat=finger.get('quat'))
+                                 pos=vector(position), quat=vector(quaternion))
     # The pad defines the assembly frame; lens/housing pose is relative to it.
     camera_mount = ET.SubElement(gripper_root, 'body', name='wrist_camera_mount',
                                  pos=vector(config['wrist_camera_mount_position']),

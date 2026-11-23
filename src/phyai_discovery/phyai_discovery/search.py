@@ -42,22 +42,25 @@ class Stationarity:
 
 class Search:
     def __init__(self, workspace, viewpoints=('wrist_1', 'wrist_2'), max_retries=2, capture_timeout=15., criteria=None, inspection_rounds=(), use_overhead=True,
-                 overhead_capture_timeout=None, overhead_max_retries=None):
+                 overhead_capture_timeout=None, overhead_max_retries=None, processing_timeout=None):
         if len(set(viewpoints)) != len(viewpoints) or any(not isinstance(v, str) or not v or v == 'overhead' for v in viewpoints):
             raise ValueError('Wrist viewpoints require unique nonempty labels.')
         if not viewpoints or max_retries < 0 or not math.isfinite(capture_timeout) or capture_timeout <= 0:
             raise ValueError('Invalid search configuration.')
         from .criteria import SearchCriteria
         self.criteria = SearchCriteria(**criteria) if isinstance(criteria,dict) else criteria
-        self.base_viewpoints = tuple(viewpoints)
+        self.configured_viewpoints = tuple(viewpoints)
         self.inspection_rounds = tuple(tuple(views) for views in inspection_rounds)
-        labels = list(self.base_viewpoints) + [view for views in self.inspection_rounds for view in views]
+        labels = list(self.configured_viewpoints) + [view for views in self.inspection_rounds for view in views]
         if any(not views for views in self.inspection_rounds) or len(set(labels)) != len(labels):
             raise ValueError('Inspection rounds require unique new physical viewpoint labels.')
         if any(not isinstance(v,str) or not v or v=='overhead' for v in labels):
             raise ValueError('Invalid inspection viewpoint label.')
-        self.workspace, self.viewpoints = workspace, self.base_viewpoints
+        self.workspace = workspace
         self.max_retries, self.timeout = max_retries, capture_timeout
+        self.processing_timeout = capture_timeout if processing_timeout is None else processing_timeout
+        if not math.isfinite(self.processing_timeout) or self.processing_timeout <= 0:
+            raise ValueError('Processing timeout must be positive.')
         self.use_overhead = use_overhead
         self.overhead_timeout = capture_timeout if overhead_capture_timeout is None else overhead_capture_timeout
         self.overhead_max_retries = max_retries if overhead_max_retries is None else overhead_max_retries
@@ -69,7 +72,9 @@ class Search:
         self.reset()
 
     def reset(self):
+        self.base_viewpoints = self.configured_viewpoints
         self.viewpoints = self.base_viewpoints
+        self.skipped_survey_views = ()
         self.inspection_round = 0
         self.no_progress_rounds = 0
         self.assessment = None
@@ -83,6 +88,15 @@ class Search:
         self.pending_since = None
         self.generation = getattr(self, 'generation', 0)+1
         self.result = None
+
+    def skip_covered_survey_views(self, labels):
+        """Prune the pending survey just after overhead, preserving its first move."""
+        if self.state != SearchState.WRIST or self.index != 0 or self.accepted != 1 or not self.use_overhead:
+            raise ValueError('Survey skips require an accepted overhead capture before the first wrist capture.')
+        labels = set(labels).union(self.skipped_survey_views)
+        self.skipped_survey_views = tuple(view for view in self.configured_viewpoints[1:] if view in labels)
+        self.base_viewpoints = tuple(view for view in self.configured_viewpoints if view not in self.skipped_survey_views)
+        self.viewpoints = self.base_viewpoints
 
     @property
     def target(self):
@@ -105,7 +119,8 @@ class Search:
                 self.pending_since = now
             # Bound optional overhead acquisition separately; inference still
             # gets the normal processing budget once a frame is accepted.
-            timeout = self.overhead_timeout if self.state == SearchState.OVERHEAD else self.timeout
+            timeout = (self.processing_timeout if self.state == SearchState.PROCESSING
+                       else self.overhead_timeout if self.state == SearchState.OVERHEAD else self.timeout)
             if now-self.pending_since > timeout:
                 self.reject('Capture or processing timed out.')
 
@@ -121,10 +136,10 @@ class Search:
         self.state = SearchState.PROCESSING
         self.reason = 'Detecting and merging capture.'
 
-    def accept(self, detection):
+    def accept(self, detection, *, allow_new=True):
         if self.state != SearchState.PROCESSING:
             raise ValueError('No capture is being processed.')
-        self.workspace.merge(detection)
+        self.workspace.merge(detection,allow_new=allow_new)
         if self.criteria is not None:
             self.assessment = self.criteria.assess(self.workspace.snapshot())
         self.accepted += 1
@@ -206,6 +221,7 @@ class Search:
                     and snap['coverage']['observed_fraction'] == 1.
                     and not any(not track['resolved'] for track in snap['tracks'])
                     and not snap.get('hypotheses')
+                    and not snap.get('unverified_hypotheses')
                     and not snap['warnings'])
         self.result = {'status': 'failed' if not self.accepted or (snap['table'] is None and not snap['tracks'])
                        else 'complete' if complete else 'partial',
@@ -219,5 +235,6 @@ class Search:
                 'viewpoint_count': len(self.viewpoints), 'target': self.target,
                 'accepted': self.accepted, 'rejected': self.rejected,
                 'attempts': self.attempts, 'reason': self.reason, 'result': self.result,
+                'skipped_survey_views': list(self.skipped_survey_views),
                 'inspection_round':self.inspection_round,'inspection_round_limit':len(self.inspection_rounds),
                 'assessment':self.assessment}

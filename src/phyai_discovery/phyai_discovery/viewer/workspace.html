@@ -10,14 +10,75 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;v
 </style></head><body>
 <header><h1>Discovered workspace</h1><a id="sim" href="#" hidden>Scene controls</a></header>
 <div class="overview-status"><p id="status">Waiting for discovery…</p><p id="error" role="status"></p></div>
-<main id="workspace-layout"><section class="panel" aria-label="Workspace map"><div class="panel-heading"><h2>Workspace map</h2><button id="fit">Fit map</button></div><canvas id="map" aria-label="Estimated workspace and coverage, top-down"></canvas>
-<div class="legend"><span><i class="dot" style="background:#319d68"></i>Observed table</span><span><i class="dot" style="background:#e4a440"></i>Uncertain</span><span><i class="dot" style="background:#526170"></i>Unobserved</span><span><i class="dot" style="background:#9874af"></i>Stale</span><span><i class="dot" style="background:#539fe9"></i>Confirmed block</span><span><i class="dot" style="background:#ff8854"></i>Candidate</span></div>
+<main id="workspace-layout"><section class="panel" aria-label="Workspace map"><div class="panel-heading"><h2>Workspace map</h2><label>Units <select id="coordinate-unit" aria-label="Coordinate display units"><option value="cm" selected>cm</option><option value="m">m</option></select></label><button id="fit">Fit map</button></div><canvas id="map" aria-label="Top-down workspace rotated 90 degrees left: positive X up, positive Y left"></canvas>
+<p id="coordinate-info" class="muted">+X ↑ up · +Y ← left · view rotated 90° left · coordinates in centimetres (cm)</p>
+<p id="pointer-coordinate" class="muted">Move over the map to read X and Y. Click a block for its center coordinates.</p>
+<p id="identity-info" class="muted">Discovery IDs follow confirmation order; they are not physical block numbers.</p>
+<div class="legend"><span><i class="dot" style="background:#319d68"></i>Observed table</span><span><i class="dot" style="background:#e4a440"></i>Uncertain</span><span><i class="dot" style="background:#526170"></i>Unobserved</span><span><i class="dot" style="background:#9874af"></i>Stale</span><span><i class="dot" style="background:#539fe9"></i>Confirmed block</span><span><i class="dot" style="background:#ff8854"></i>Candidate / uncertain pose</span></div>
 <p class="muted">Camera-derived estimates. Drag to pan, scroll to zoom, click a block for details.</p></section>
 <section id="scene-panel" class="panel" aria-label="Live simulator" hidden><div class="panel-heading"><h2>Live 3D viewer</h2><select id="scene-view" aria-label="Simulator camera"><option value="overview">3D overview</option><option value="overhead">Overhead camera</option><option value="wrist">Wrist camera</option></select></div><img id="scene-feed" alt="Live 3D simulation alongside the workspace map"><p id="scene-status" class="muted" role="status">Connecting to simulator…</p></section>
 <section id="camera-panel" class="panel" aria-label="Live cameras" hidden><div class="panel-heading"><h2>Live camera</h2><select id="camera-view" aria-label="Camera to preview"></select></div><img id="camera-feed" alt="Live camera preview" hidden><p id="camera-status" class="muted" role="status">Waiting for camera images…</p><p id="camera-topic" class="muted"></p></section>
+<section id="capture-panel" class="panel" style="grid-column:1/-1" aria-label="Accepted-image diagnostics" hidden>
+<div class="panel-heading"><h2>Accepted image · segmentation diagnostics</h2><label><input id="capture-follow" type="checkbox" checked> Follow newest</label></div>
+<div class="panel-heading"><select id="capture-frame" aria-label="Accepted capture"></select><select id="capture-layer" aria-label="Segmentation layer"></select><a id="capture-download" download>Download evidence JSON</a></div>
+<img id="capture-image" alt="Accepted RGB image with segmentation evidence" style="width:100%;max-height:65vh;object-fit:contain;background:#080a0e">
+<p id="capture-status" class="muted"></p><p id="plate-status" class="muted"></p><p id="rejected-status" class="muted"></p>
+<p class="muted">Tinted pixels are model segmentation masks. Rectangles are bounding boxes. A segmented region is a provisional candidate, not proof of a physical block.</p>
+<details><summary>Mask decisions, fits and capture geometry</summary><pre id="capture-details"></pre></details></section>
 <aside><section><h2>Discovery progress</h2><div id="progress-summary" class="muted">Waiting for discovery…</div><details><summary>Search details and image rates</summary><div id="summary"></div></details></section><section><h2>Final block inventory</h2><div id="block-info" class="muted">Waiting for search to finish.</div><div id="block-list"></div></section><section><h2>Selected candidate</h2><pre id="detail">Click a block fit.</pre></section></aside></main>
 <script>
+const captureFrame=document.getElementById('capture-frame'),captureLayer=document.getElementById('capture-layer');
+let acceptedPacket=null,capturePolling=false;
+function showCaptureImage(){if(!acceptedPacket)return;document.getElementById('capture-image').src='/capture/'+encodeURIComponent(acceptedPacket.id)+'/'+encodeURIComponent(captureLayer.value)+'.jpg'}
+async function loadCapture(){
+ const id=captureFrame.value;if(!id)return;
+ try{const response=await fetch('/api/captures/'+encodeURIComponent(id));if(!response.ok)throw Error('Capture unavailable');
+ const packet=await response.json();if(id!==captureFrame.value)return;acceptedPacket=packet;
+ const previous=captureLayer.value;
+ captureLayer.replaceChildren(...[['masks','Filtered masks · no boxes'],['sam2','All raw masks'],['accepted','Candidate boxes + filtered masks'],['rgb','Accepted RGB'],...packet.segments.flatMap((m,i)=>[['segment_'+i,'Raw mask '+i+(m.class_name?' · '+m.class_name:'')+' · '+m.decision+(m.score==null?'':' · score '+m.score.toFixed(3))],['binary_'+i,'Binary mask '+i]])].map(([value,label])=>{const option=document.createElement('option');option.value=value;option.textContent=label;return option}));
+ if([...captureLayer.options].some(o=>o.value===previous))captureLayer.value=previous;
+ document.getElementById('capture-status').textContent=packet.camera+' · '+packet.viewpoint+' · '+packet.phase+' · '+packet.segments.length+' '+(packet.segmentation_backend||'sam2')+' masks · '+packet.candidates.length+' provisional region observations · frame '+packet.frame+(packet.segmentation_prompt?' · prompt: '+packet.segmentation_prompt:'')+(packet.segmentation_min_score==null?'':' · threshold: '+packet.segmentation_min_score);
+ const clean={...packet,images:undefined,source_png:undefined,segments:packet.segments.map(({mask_bits,used_mask_bits,...metadata})=>metadata)};
+ document.getElementById('capture-details').textContent=JSON.stringify(clean,null,2);
+ document.getElementById('capture-download').href='/api/captures/'+encodeURIComponent(id);showCaptureImage();
+ }catch(error){document.getElementById('capture-status').textContent=error.message}
+}
+async function pollCaptures(){
+ if(capturePolling)return;capturePolling=true;
+ try{const response=await fetch('/api/captures');if(!response.ok)return;const frames=await response.json();if(!frames.length){document.getElementById('capture-panel').hidden=true;document.getElementById('capture-image').removeAttribute('src');acceptedPacket=null;return}
+ document.getElementById('capture-panel').hidden=false;
+ const previous=captureFrame.value;
+ captureFrame.replaceChildren(...frames.map(frame=>{const option=document.createElement('option');option.value=frame.id;option.textContent=frame.id+' · '+frame.camera+' · '+frame.viewpoint+' · '+frame.phase;return option}));
+ captureFrame.value=document.getElementById('capture-follow').checked?frames[frames.length-1].id:frames.some(f=>f.id===previous)?previous:frames[0].id;
+ if(!acceptedPacket||acceptedPacket.id!==captureFrame.value||acceptedPacket.session_id!==frames.find(f=>f.id===captureFrame.value)?.session_id)await loadCapture();
+ if(data){const coverage=data.workspace.coverage;
+ document.getElementById('plate-status').textContent='Measured accepted-image coverage: '+(coverage.plates||[]).map(p=>'plate '+p.id+': '+(p.explored_fraction*100).toFixed(1)+'%').join(' · ');
+ const unverified=data.workspace.unverified_hypotheses||[];const rejected=data.workspace.rejected_hypotheses||[];document.getElementById('rejected-status').textContent=rejected.length+' rejected candidates: '+rejected.map(h=>h.hypothesis_id+' ('+h.rejection_reason+')').join('; ')+' · '+unverified.length+' unverified: '+unverified.map(h=>h.hypothesis_id+' ('+h.retirement_reason+')').join('; ')}
+ }finally{capturePolling=false}
+}
+captureFrame.onchange=()=>{document.getElementById('capture-follow').checked=false;loadCapture()};captureLayer.onchange=showCaptureImage;
+document.getElementById('capture-follow').onchange=pollCaptures;
 const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
+const coordinateUnit=document.getElementById('coordinate-unit');
+function coordinateFactor(){return coordinateUnit.value==='m'?1:100}
+function coordinateValue(value){const factor=coordinateFactor(),digits=coordinateUnit.value==='m'?3:1;const rounded=Number((value*factor).toFixed(digits));return rounded.toFixed(digits)}
+function poseLabel(block){return block.pose_conflict&&block.last_consistent_pose?'Retained; recheck':block.resolved&&!block.pose_conflict?'Resolved':'Needs observation'}
+function xyText(position){return `X ${coordinateValue(position[0])}, Y ${coordinateValue(position[1])} ${coordinateUnit.value}`}
+function unproject(x,y){return[center[0]-(y-canvas.clientHeight/2)/scale,center[1]-(x-canvas.clientWidth/2)/scale]}
+function arrow(x0,y0,x1,y1,label,color){ctx.save();ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.stroke();const angle=Math.atan2(y1-y0,x1-x0);ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x1-8*Math.cos(angle-.45),y1-8*Math.sin(angle-.45));ctx.lineTo(x1-8*Math.cos(angle+.45),y1-8*Math.sin(angle+.45));ctx.closePath();ctx.fill();ctx.font='bold 12px system-ui';ctx.fillText(label,x1+5,y1-5);ctx.restore()}
+function drawCoordinateAxes(w,W,H){
+ const origin=project(0,0);ctx.save();ctx.setLineDash([5,4]);ctx.lineWidth=1.5;
+ ctx.strokeStyle='#ff8c8c';ctx.beginPath();ctx.moveTo(origin[0],0);ctx.lineTo(origin[0],H);ctx.stroke();
+ ctx.strokeStyle='#8ee0b0';ctx.beginPath();ctx.moveTo(0,origin[1]);ctx.lineTo(W,origin[1]);ctx.stroke();ctx.setLineDash([]);
+ ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(...origin,4,0,2*Math.PI);ctx.fill();ctx.font='bold 12px system-ui';ctx.fillText(`(0, 0) ${coordinateUnit.value}`,origin[0]+7,origin[1]+18);
+ // The inset remains visible when panning moves the actual origin off screen.
+ ctx.fillStyle='#101820';ctx.fillRect(W-126,10,116,104);arrow(W-44,91,W-44,35,'+X','#ff8c8c');arrow(W-44,91,W-106,91,'+Y','#8ee0b0');ctx.fillStyle='#c0ccd6';ctx.font='11px system-ui';ctx.fillText(`90° left · ${coordinateUnit.value}`,W-114,108);
+ if(w.frame==='tabletop'&&w.coordinate_system?.source_frame==='base_link'){
+  const base=w.coordinate_system.origin_in_source,p=project(-base[0],-base[1]);ctx.strokeStyle='#c8b5ff';ctx.beginPath();ctx.arc(...p,5,0,2*Math.PI);ctx.stroke();ctx.fillStyle='#c8b5ff';ctx.fillText('Arm post',p[0]+8,p[1]-7);
+ }
+ ctx.restore();
+}
+coordinateUnit.onchange=()=>{document.getElementById('pointer-coordinate').textContent='Move over the map to read X and Y.';draw()};
 let data=null,age=0,selected=null,scale=300,center=[0,0],fittedSession=null,drag=null,packetReceived=performance.now(),hits=[];
 const sceneFeed=document.getElementById('scene-feed'),sceneStatus=document.getElementById('scene-status');
 let simulatorBase=null;
@@ -62,16 +123,23 @@ function configureCameras(cameras){
 cameraView.onchange=()=>{pauseCamera();cameraTimer=null;cameraFeed.hidden=true;document.getElementById('camera-topic').textContent='';refreshCamera()};
 
 
-function fit(){if(!data)return;const w=data.workspace,s=w.coverage.scope||w.table?.observed_surface_bounds||[-.8,.8,-.5,.5];center=[(s[0]+s[1])/2,(s[2]+s[3])/2];scale=Math.min(canvas.clientWidth/(s[1]-s[0]+.2),canvas.clientHeight/(s[3]-s[2]+.2));draw()}
-function project(x,y){return[canvas.clientWidth/2+(x-center[0])*scale,canvas.clientHeight/2-(y-center[1])*scale]}
+function fit(){if(!data)return;const w=data.workspace,s=w.coverage.scope||w.table?.observed_surface_bounds||[-.8,.8,-.5,.5];center=[(s[0]+s[1])/2,(s[2]+s[3])/2];scale=Math.min(canvas.clientWidth/(s[3]-s[2]+.2),canvas.clientHeight/(s[1]-s[0]+.2));draw()}
+function project(x,y){return[canvas.clientWidth/2-(y-center[1])*scale,canvas.clientHeight/2-(x-center[0])*scale]}
 function draw(){if(document.hidden)return;const dpr=devicePixelRatio||1,W=canvas.clientWidth,H=canvas.clientHeight;canvas.width=W*dpr;canvas.height=H*dpr;ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);hits=[];if(!data)return;
  const w=data.workspace,elapsed=(performance.now()-packetReceived)/1000,stale=age+elapsed>3;
  ctx.strokeStyle='#263747';ctx.lineWidth=1;ctx.fillStyle='#8196a8';ctx.font='11px system-ui';
- for(let x=Math.floor((center[0]-W/scale/2)*10)/10;x<center[0]+W/scale/2;x+=.1){let p=project(x,center[1]);ctx.beginPath();ctx.moveTo(p[0],0);ctx.lineTo(p[0],H);ctx.stroke();ctx.fillText(x.toFixed(1),p[0]+3,H-5)}
- for(let y=Math.floor((center[1]-H/scale/2)*10)/10;y<center[1]+H/scale/2;y+=.1){let p=project(center[0],y);ctx.beginPath();ctx.moveTo(0,p[1]);ctx.lineTo(W,p[1]);ctx.stroke();ctx.fillText(y.toFixed(1),4,p[1]-3)}
+ for(let x=Math.floor((center[0]-H/scale/2)*10)/10;x<center[0]+H/scale/2;x+=.1){let p=project(x,center[1]);ctx.beginPath();ctx.moveTo(0,p[1]);ctx.lineTo(W,p[1]);ctx.stroke();ctx.fillText(coordinateValue(x),4,p[1]-3)}
+ for(let y=Math.floor((center[1]-W/scale/2)*10)/10;y<center[1]+W/scale/2;y+=.1){let p=project(center[0],y);ctx.beginPath();ctx.moveTo(p[0],0);ctx.lineTo(p[0],H);ctx.stroke();ctx.fillText(coordinateValue(y),p[0]+3,H-5)}
+ // Physical tabletop stays continuous, including unsurveyed or historically
+ // excluded areas. Coverage cells add measured states without cutting holes.
+ const polygon=w.coverage.table_polygon;
+ if(polygon?.length){ctx.beginPath();polygon.forEach((xy,i)=>{const p=project(...xy);if(i)ctx.lineTo(...p);else ctx.moveTo(...p)});ctx.closePath();ctx.fillStyle='#26333e';ctx.fill();ctx.strokeStyle='#647889';ctx.lineWidth=1.5;ctx.stroke()}
  const cell=w.coverage.cell_size;
  for(const c of w.coverage.cells){const p=project((c.index[0]+.5)*cell,(c.index[1]+.5)*cell);ctx.fillStyle=stale||(c.age!==null&&c.age+elapsed>10&&!data.search.result)?'#9874af':{observed:'#319d68',uncertain:'#e4a440',unobserved:'#526170'}[c.state];ctx.globalAlpha=c.state==='unobserved'?.25:.55;ctx.fillRect(p[0]-cell*scale/2,p[1]-cell*scale/2,cell*scale,cell*scale)}ctx.globalAlpha=1;
- for(const t of [...w.tracks,...(w.hypotheses||[])]){const p=project(t.position[0],t.position[1]),[qw,qx,qy,qz]=t.quaternion,yaw=Math.atan2(2*(qw*qz+qx*qy),1-2*(qy*qy+qz*qz));ctx.save();ctx.translate(...p);ctx.rotate(-yaw);ctx.fillStyle=stale||(t.age+elapsed>10&&!data.search.result)?'#9874af':t.id&&t.resolved?'#539fe9':'#ff8854';ctx.globalAlpha=.55;ctx.fillRect(-t.size[0]*scale/2,-t.size[1]*scale/2,t.size[0]*scale,t.size[1]*scale);ctx.globalAlpha=1;ctx.strokeStyle=(t.track_id||t.id||t.hypothesis_id)===selected?'#fff':ctx.fillStyle;ctx.lineWidth=(t.track_id||t.id||t.hypothesis_id)===selected?3:1;ctx.strokeRect(-t.size[0]*scale/2,-t.size[1]*scale/2,t.size[0]*scale,t.size[1]*scale);ctx.restore();ctx.fillStyle='#edf4ff';ctx.fillText(t.id||t.hypothesis_id,p[0]+5,p[1]-7);hits.push({t,p,r:Math.max(10,Math.hypot(t.size[0],t.size[1])*scale/2)})}
+ drawCoordinateAxes(w,W,H);
+ for(const t of [...w.tracks,...(w.hypotheses||[]),...(w.unverified_hypotheses||[])]){const p=project(t.position[0],t.position[1]),[qw,qx,qy,qz]=t.quaternion,yaw=Math.atan2(2*(qw*qz+qx*qy),1-2*(qy*qy+qz*qz));ctx.save();ctx.translate(...p);ctx.rotate(-yaw-Math.PI/2);ctx.fillStyle=stale||(t.age+elapsed>10&&!data.search.result)?'#9874af':t.id&&t.resolved?'#539fe9':'#ff8854';ctx.globalAlpha=.55;ctx.fillRect(-t.size[0]*scale/2,-t.size[1]*scale/2,t.size[0]*scale,t.size[1]*scale);ctx.globalAlpha=1;ctx.strokeStyle=(t.track_id||t.id||t.hypothesis_id)===selected?'#fff':ctx.fillStyle;ctx.lineWidth=(t.track_id||t.id||t.hypothesis_id)===selected?3:1;ctx.strokeRect(-t.size[0]*scale/2,-t.size[1]*scale/2,t.size[0]*scale,t.size[1]*scale);ctx.restore();ctx.fillStyle='#edf4ff';ctx.fillText((t.id||t.hypothesis_id)+(t.pose_conflict?' !':''),p[0]+5,p[1]-7);ctx.font='10px system-ui';const label=xyText(t.position),width=ctx.measureText(label).width;ctx.fillStyle='#101820';ctx.fillRect(p[0]+3,p[1]+1,width+5,14);ctx.fillStyle='#d6e2ed';ctx.fillText(label,p[0]+5,p[1]+12);ctx.font='11px system-ui';hits.push({t,p,r:Math.max(10,Math.hypot(t.size[0],t.size[1])*scale/2)})}
+ document.getElementById('coordinate-info').textContent=`Frame: ${w.frame} · ${w.frame==='tabletop'?'Origin (0, 0): four-plate junction · ':''}+X ↑ up · +Y ← left · view rotated 90° left · block centers in ${coordinateUnit.value} · Z points upward${w.coordinate_system?.source_frame==='base_link'?' · axes parallel to arm base_link':''}`;
+ document.getElementById('identity-info').textContent=w.stacking_order?.assigned?'Discovery IDs reflect stacking order; select a block to see its original track and candidate IDs.':'Discovery IDs follow confirmation order and can change between runs; they are not physical block numbers.';
  document.getElementById('status').textContent=(stale?'STALE PUBLISHER · ':'')+data.search.state.replaceAll('_',' ')+' · '+data.search.reason;
  document.getElementById('error').textContent=data.last_error||'';
  const summary=document.getElementById('summary');summary.replaceChildren();
@@ -83,21 +151,28 @@ function draw(){if(document.hidden)return;const dpr=devicePixelRatio||1,W=canvas
  for(const [camera,rates] of Object.entries(data.camera_rates||{})){const row=document.createElement('div');row.className='row';row.textContent=`${camera}: receiving ${rates.received_hz.toFixed(1)} Hz · detection ${rates.detection_hz.toFixed(2)} Hz`;summary.append(row)}
  if(data.last_detection_seconds!=null){const row=document.createElement('div');row.className='row';row.textContent=`Last detection: ${data.last_detection_seconds.toFixed(2)} s`;summary.append(row)}
  const info=data.block_info;
- document.getElementById('block-info').textContent=info?.status==='ready'?`Final inventory · ${info.search_status} · ${info.frame_id}`:(info?.message||'Waiting for search to finish.');
+ const surveyOnly=data.discovery_mode==='survey_only';
+ document.getElementById('block-info').textContent=surveyOnly?'Survey only: review provisional candidates. Close inspection is disabled.':info?.status==='ready'?`Final inventory · ${info.search_status} · ${info.frame_id}`:(info?.message||'Waiting for search to finish.');
  const list=document.getElementById('block-list');list.replaceChildren();
- if(info?.status==='ready'){
+ if(info?.status==='ready'&&!surveyOnly){
   if(!info.blocks.length){list.textContent='No confirmed blocks.'}
   else{const table=document.createElement('table'),head=table.createTHead().insertRow();
-   for(const label of ['Block','Position (m)','Yaw (°)']){const th=document.createElement('th');th.textContent=label;head.append(th)}
+   for(const label of ['Discovery ID',`X (${coordinateUnit.value})`,`Y (${coordinateUnit.value})`,`Z (${coordinateUnit.value})`,'Yaw (°)','Pose',`Position bound (${coordinateUnit.value})`]){const th=document.createElement('th');th.textContent=label;head.append(th)}
    const body=table.createTBody();for(const block of info.blocks){const row=body.insertRow(),[qw,qx,qy,qz]=block.quaternion,yaw=Math.atan2(2*(qw*qz+qx*qy),1-2*(qy*qy+qz*qz))*180/Math.PI;
-    for(const value of [block.id,block.position.map(n=>n.toFixed(3)).join(', '),yaw.toFixed(1)])row.insertCell().textContent=value;
+    for(const value of [block.id,...block.position.map(coordinateValue),yaw.toFixed(1),poseLabel(block),Number.isFinite(block.pose_uncertainty?.position_m)?'± '+coordinateValue(block.pose_uncertainty.position_m):'Unknown'])row.insertCell().textContent=value;
     row.onclick=()=>{selected=block.track_id||block.id;draw()};
    }list.append(table)}
  }
  const assessment=data.search.assessment;
  if(assessment){for(const text of [`Scope target: ${(assessment.min_explored_fraction*100).toFixed(1)}%`,`Resolved views per block: ≥ ${assessment.min_resolved_views}`,`Position bound: ≤ ${(assessment.max_position_uncertainty*1000).toFixed(1)} mm`,`Yaw bound: ≤ ${(assessment.max_yaw_uncertainty*180/Math.PI).toFixed(1)}°`,...assessment.reasons]){const el=document.createElement('div');el.className='row';el.textContent=text;summary.append(el)}}
- if(selected){const t=[...w.tracks,...(w.hypotheses||[])].find(t=>(t.track_id||t.id||t.hypothesis_id)===selected);document.getElementById('detail').textContent=t?`Identity: ${t.identity_state||(t.id?'confirmed':'provisional')}
-Pose: ${t.pose_state||(t.resolved?'resolved':'needs observation')}
+ if(selected){const t=[...w.tracks,...(w.hypotheses||[]),...(w.unverified_hypotheses||[])].find(t=>(t.track_id||t.id||t.hypothesis_id)===selected);document.getElementById('detail').textContent=t?`Discovery ID: ${t.id||t.hypothesis_id}
+Candidate ID: ${t.hypothesis_id||'unknown'}
+Frame: ${w.frame}
+${t.pose_conflict&&t.last_consistent_pose?'Retained center (needs verification)':'Block center'}: ${xyText(t.position)}, Z ${coordinateValue(t.position[2])} ${coordinateUnit.value}
+Yaw: ${(Math.atan2(2*(t.quaternion[0]*t.quaternion[3]+t.quaternion[1]*t.quaternion[2]),1-2*(t.quaternion[2]**2+t.quaternion[3]**2))*180/Math.PI).toFixed(1)}° from +X toward +Y (180° equivalent for this block)
+Identity: ${t.identity_state||(t.id?'confirmed':'provisional')}
+Pose: ${poseLabel(t)}
+Position bound: ${Number.isFinite(t.pose_uncertainty?.position_m)?'± '+coordinateValue(t.pose_uncertainty.position_m)+' '+coordinateUnit.value:'unknown'}
 Observation criteria: ${assessment?.blocks.find(b=>b.id===t.id)?.meets_criteria?'met':assessment?'unmet':'not configured'}
 Observation age: ${(t.age+elapsed).toFixed(1)} s
 Age does not revoke static-scene confirmation.
@@ -105,12 +180,12 @@ Age does not revoke static-scene confirmation.
 `+JSON.stringify(t,null,2):'Candidate no longer present.'}else{document.getElementById('detail').textContent='Click a block fit.'}
 }
 canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY,...center];canvas.setPointerCapture(e.pointerId)};
-canvas.onpointermove=e=>{if(drag){center=[drag[2]-(e.clientX-drag[0])/scale,drag[3]+(e.clientY-drag[1])/scale];draw()}};
+canvas.onpointermove=e=>{if(drag){center=[drag[2]+(e.clientY-drag[1])/scale,drag[3]+(e.clientX-drag[0])/scale];draw()}const rect=canvas.getBoundingClientRect(),position=unproject(e.clientX-rect.left,e.clientY-rect.top);document.getElementById('pointer-coordinate').textContent=`Cursor: ${xyText(position)} · origin in ${data?.workspace.frame||'map'} frame`};
 canvas.onpointerup=e=>{if(drag&&Math.hypot(e.clientX-drag[0],e.clientY-drag[1])<5){const rect=canvas.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;const hit=hits.filter(h=>Math.hypot(h.p[0]-x,h.p[1]-y)<h.r).sort((a,b)=>Math.hypot(a.p[0]-x,a.p[1]-y)-Math.hypot(b.p[0]-x,b.p[1]-y))[0];selected=(hit?.t.track_id||hit?.t.id||hit?.t.hypothesis_id)||null;draw()}drag=null};
 canvas.onwheel=e=>{e.preventDefault();scale=Math.max(20,Math.min(2500,scale*Math.exp(-e.deltaY*.001)));draw()};
 document.getElementById('fit').onclick=fit;window.onresize=draw;
 let polling=false,pollTimer;
-async function poll(){if(document.hidden||polling)return;clearTimeout(pollTimer);polling=true;try{const response=await fetch('/api/workspace');if(!response.ok)throw Error('Map server unavailable');const packet=await response.json();configureSimulator(packet.simulator_port);configureCameras(packet.cameras);if(packet.snapshot){data=packet.snapshot;age=packet.publisher_age;packetReceived=performance.now();if(fittedSession!==data.workspace.session_id){fittedSession=data.workspace.session_id;selected=null;fit()}draw()}}catch(error){document.getElementById('status').textContent='Workspace unavailable: '+error.message}finally{polling=false;if(!document.hidden)pollTimer=setTimeout(poll,1000)}}
+async function poll(){if(document.hidden||polling)return;clearTimeout(pollTimer);polling=true;try{const response=await fetch('/api/workspace');if(!response.ok)throw Error('Map server unavailable');const packet=await response.json();configureSimulator(packet.simulator_port);configureCameras(packet.cameras);pollCaptures();if(packet.snapshot){data=packet.snapshot;age=packet.publisher_age;packetReceived=performance.now();if(fittedSession!==data.workspace.session_id){fittedSession=data.workspace.session_id;selected=null;fit()}draw()}}catch(error){document.getElementById('status').textContent='Workspace unavailable: '+error.message}finally{polling=false;if(!document.hidden)pollTimer=setTimeout(poll,1000)}}
 document.addEventListener('visibilitychange',()=>{clearTimeout(pollTimer);if(document.hidden){pauseScene();pauseCamera();cameraTimer=null;}else{resumeScene();refreshCamera();poll()}});
 window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);pauseScene();pauseCamera();cameraTimer=null});
 window.addEventListener('pageshow',()=>{resumeScene();refreshCamera();poll()});poll();

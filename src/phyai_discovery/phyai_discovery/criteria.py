@@ -16,6 +16,7 @@ def inspection_targets(tracks, assessment):
         result.append({'id': track['id'] or track['hypothesis_id'],
                        'candidate_id': track.get('hypothesis_id') or track['id'],
                        'position': list(track['position']), 'size': list(track['size']),
+                       **({'quaternion':list(track['quaternion'])} if track.get('quaternion') is not None else {}),
                        'priority': priority,
                        'supporting_views': track.get('supporting_views', [])})
     return result
@@ -30,6 +31,7 @@ class SearchCriteria:
     max_yaw_uncertainty: float = math.radians(5)
     min_coverage_gain: float = .005
     max_no_progress_rounds: int = 1
+    require_tabletop_coverage: bool = True
 
     def __post_init__(self):
         values = (self.min_explored_fraction,self.max_position_uncertainty,
@@ -52,13 +54,18 @@ class SearchCriteria:
             reasons.append('table plane is unknown')
         if snapshot['coverage']['scope'] is None:
             reasons.append('search scope is unspecified')
-        if coverage < self.min_explored_fraction:
+        if self.require_tabletop_coverage and coverage < self.min_explored_fraction:
             reasons.append(f'explored scope {coverage:.1%} below {self.min_explored_fraction:.1%}')
+        if not self.require_tabletop_coverage and not snapshot['tracks']:
+            reasons.append('no confirmed blocks')
         if snapshot['coverage'].get('unexplained_cells', 0):
             reasons.append('unexplained above-table depth remains')
         pending = snapshot.get('hypotheses',[])
         if pending:
             reasons.append(f'{len(pending)} provisional object hypotheses')
+        unverified = snapshot.get('unverified_hypotheses', [])
+        if unverified:
+            reasons.append(f'{len(unverified)} unverified objects after inspection; scene remains uncertain')
         blocks = []
         for track in snapshot['tracks']:
             uncertainty = track.get('pose_uncertainty',{})
@@ -83,7 +90,8 @@ class SearchCriteria:
                 'min_wrist_views':self.min_wrist_views,
                 'max_position_uncertainty':self.max_position_uncertainty,
                 'max_yaw_uncertainty':self.max_yaw_uncertainty,
-                'blocks':blocks,'pending_hypotheses':len(pending),'support_count':support,
+                'blocks':blocks,'pending_hypotheses':len(pending),
+                'unverified_hypotheses':len(unverified),'support_count':support,
                 'basis':'evidence thresholds; not calibrated probabilities'}
 
     def improved(self, previous, current):
